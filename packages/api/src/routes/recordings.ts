@@ -1,7 +1,12 @@
 import { Router } from "express";
+import { createReadStream } from "node:fs";
+import path from "node:path";
+import archiver from "archiver";
 import { CreateRecordingSessionBody, RegisterRecordingFileBody } from "@debates/shared";
 import { requireBotToken } from "../middleware/botAuth.js";
+import { requireAdmin } from "../auth/requireAdmin.js";
 import { buildConfig } from "../config.js";
+import { prisma } from "../prisma.js";
 import * as rec from "../services/recordings.js";
 
 const config = buildConfig();
@@ -45,4 +50,61 @@ recordingsRouter.post<{ id: string }>("/sessions/:id/complete", requireBotToken(
   res.json(session);
 });
 
-// Admin read endpoints are added in Task 6 (list/detail/download/zip).
+recordingsRouter.get("/sessions", requireAdmin, async (_req, res) => {
+  const sessions = await prisma.recordingSession.findMany({
+    orderBy: { startedAt: "desc" },
+    include: { _count: { select: { files: true } }, files: { select: { userId: true } } },
+  });
+  res.json(
+    sessions.map((s) => ({
+      id: s.id,
+      started_at: s.startedAt,
+      ended_at: s.endedAt,
+      voice_channel_name: s.voiceChannelName,
+      status: s.status,
+      speaker_count: s._count.files,
+      identified_count: s.files.filter((f) => f.userId).length,
+    })),
+  );
+});
+
+recordingsRouter.get<{ id: string }>("/sessions/:id", requireAdmin, async (req, res) => {
+  const session = await prisma.recordingSession.findUnique({
+    where: { id: req.params.id },
+    include: { files: { include: { user: true } } },
+  });
+  if (!session) return res.status(404).json({ error: "not_found" });
+  res.json({
+    ...session,
+    files: session.files.map((f) => ({ ...f, sizeBytes: f.sizeBytes.toString() })),
+  });
+});
+
+recordingsRouter.get<{ id: string; discordUserId: string }>("/sessions/:id/files/:discordUserId.opus", requireAdmin, async (req, res) => {
+  const file = await prisma.recordingFile.findUnique({
+    where: { sessionId_discordUserId: { sessionId: req.params.id, discordUserId: req.params.discordUserId } },
+    include: { session: true },
+  });
+  if (!file) return res.status(404).json({ error: "not_found" });
+  res.setHeader("Content-Type", "audio/ogg");
+  res.setHeader("Content-Disposition", `attachment; filename="${path.basename(file.filePath)}"`);
+  createReadStream(path.join(file.session.fileDir, file.filePath)).pipe(res);
+});
+
+recordingsRouter.get<{ id: string }>("/sessions/:id/zip", requireAdmin, async (req, res) => {
+  const session = await prisma.recordingSession.findUnique({
+    where: { id: req.params.id },
+    include: { files: true },
+  });
+  if (!session) return res.status(404).json({ error: "not_found" });
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader("Content-Disposition", `attachment; filename="session-${session.id}.zip"`);
+  const archive = archiver("zip");
+  archive.on("error", (e) => res.destroy(e));
+  archive.pipe(res);
+  for (const f of session.files) {
+    archive.file(path.join(session.fileDir, f.filePath), { name: f.filePath });
+  }
+  archive.file(path.join(session.fileDir, "_metadata.json"), { name: "_metadata.json" });
+  await archive.finalize();
+});

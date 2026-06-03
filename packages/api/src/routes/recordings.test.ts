@@ -39,4 +39,13 @@ describe("recordings router", () => {
     const second = await bot(request(app).post("/api/recordings/sessions").send(sessionBody));
     expect(second.status).toBe(409);
   });
+
+  it("GET /api/recordings/sessions lists sessions for admin", async () => {
+    await bot(request(app).post("/api/recordings/sessions").send(sessionBody));
+    const res = await request(app)
+      .get("/api/recordings/sessions")
+      .set("x-test-admin-id", "00000000-0000-0000-0000-000000000001");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+  });
 });
