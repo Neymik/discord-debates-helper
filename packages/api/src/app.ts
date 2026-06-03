@@ -1,3 +1,4 @@
+import "express-async-errors";
 import express, { type Express } from "express";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler.js";
 import { gamesRouter } from "./routes/games.js";

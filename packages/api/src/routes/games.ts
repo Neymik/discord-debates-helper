@@ -15,14 +15,24 @@ const UpdateBody = z.object({
   participant_user_ids: z.array(z.string().uuid()).optional(),
 });
 
+const ListQuery = z.object({
+  status: z.enum(["scheduled", "cancelled"]).optional(),
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+});
+
 export const gamesRouter = Router();
 gamesRouter.use(requireAdmin);
 
 gamesRouter.get("/", async (req, res) => {
-  const status = req.query.status === "cancelled" ? "cancelled" : req.query.status === "scheduled" ? "scheduled" : undefined;
-  const from = typeof req.query.from === "string" ? new Date(req.query.from) : undefined;
-  const to = typeof req.query.to === "string" ? new Date(req.query.to) : undefined;
-  res.json(await games.listGames({ status, from, to }));
+  const q = ListQuery.parse(req.query);
+  res.json(
+    await games.listGames({
+      status: q.status,
+      from: q.from ? new Date(q.from) : undefined,
+      to: q.to ? new Date(q.to) : undefined,
+    }),
+  );
 });
 
 gamesRouter.post("/", async (req, res) => {

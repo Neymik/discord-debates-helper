@@ -53,6 +53,22 @@ describe("games router", () => {
     expect(res.body).toHaveLength(1);
   });
 
+  it("POST /api/games rejects a malformed scheduled_at with 400", async () => {
+    const admin = await seedAdminUser();
+    const res = await asAdmin(
+      request(app).post("/api/games").send({ scheduled_at: "not-a-date", participant_user_ids: [] }),
+      admin.id,
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("validation_error");
+  });
+
+  it("GET /api/games rejects an invalid date filter with 400", async () => {
+    const admin = await seedAdminUser();
+    const res = await asAdmin(request(app).get("/api/games?from=garbage"), admin.id);
+    expect(res.status).toBe(400);
+  });
+
   it("POST /api/games/:id/cancel sets status cancelled", async () => {
     const admin = await seedAdminUser();
     const game = await prisma.game.create({
