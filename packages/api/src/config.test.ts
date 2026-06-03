@@ -33,4 +33,14 @@ describe("buildConfig", () => {
     expect(cfg.port).toBe(3000);
     expect(cfg.recordingsDir).toBe("/var/lib/debates/recordings");
   });
+
+  it("honors an explicit non-default PORT", () => {
+    const cfg = buildConfig({ ...env, PORT: "4100" });
+    expect(cfg.port).toBe(4100);
+  });
+
+  it("falls back to 3000 when PORT is non-numeric", () => {
+    const cfg = buildConfig({ ...env, PORT: "abc" });
+    expect(cfg.port).toBe(3000);
+  });
 });

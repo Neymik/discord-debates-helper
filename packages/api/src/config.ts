@@ -13,10 +13,16 @@ export interface Config {
   maxSessionHours: number;
 }
 
+function parsePort(raw: string | undefined): number {
+  if (!raw) return 3000;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : 3000;
+}
+
 export function buildConfig(source: Record<string, string | undefined> = process.env): Config {
   const env = loadEnv(source);
   return {
-    port: source.PORT ? Number(source.PORT) : 3000,
+    port: parsePort(source.PORT),
     recordingsDir: source.RECORDINGS_DIR ?? "/var/lib/debates/recordings",
     databaseUrl: env.DATABASE_URL,
     redisUrl: env.REDIS_URL,
