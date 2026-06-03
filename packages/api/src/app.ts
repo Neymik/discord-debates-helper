@@ -1,5 +1,6 @@
 import express, { type Express } from "express";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler.js";
+import { gamesRouter } from "./routes/games.js";
 
 /** Builds the Express app without binding a port (so tests can use supertest). */
 export function createApp(): Express {
@@ -10,7 +11,7 @@ export function createApp(): Express {
     res.json({ status: "ok" });
   });
 
-  // Domain routers are mounted here in Plan 2.
+  app.use("/api/games", gamesRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);
