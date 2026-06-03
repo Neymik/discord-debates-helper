@@ -39,6 +39,14 @@ describe("link router", () => {
     expect(redeemed.body).toMatchObject({ telegram_user_id: 42, display_name: "Zed" });
   });
 
+  it("issue returns 404 when the telegram user does not exist", async () => {
+    const res = await request(app)
+      .post("/api/link/issue")
+      .set("authorization", `Bearer ${cfg.telegramBotApiToken}`)
+      .send({ telegram_user_id: 999999 });
+    expect(res.status).toBe(404);
+  });
+
   it("redeem returns 404 for an unknown code", async () => {
     const res = await request(app)
       .post("/api/link/redeem")

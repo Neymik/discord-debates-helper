@@ -40,7 +40,7 @@ describe("games router", () => {
     );
     expect(res.status).toBe(201);
     expect(res.body.motion).toBe("THW ban X");
-    expect(res.body.participants).toHaveLength(1);
+    expect(res.body.participant_user_ids).toHaveLength(1);
   });
 
   it("GET /api/games lists scheduled games", async () => {

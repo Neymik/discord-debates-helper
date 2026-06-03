@@ -2,7 +2,7 @@ import { Router } from "express";
 import { IssueLinkBody, RedeemLinkBody } from "@debates/shared";
 import { requireBotToken } from "../middleware/botAuth.js";
 import { buildConfig } from "../config.js";
-import { issueCode, redeemCode, DiscordAlreadyLinked } from "../services/linkcodes.js";
+import { issueCode, redeemCode, DiscordAlreadyLinked, UserNotFound } from "../services/linkcodes.js";
 
 const config = buildConfig();
 export const linkRouter = Router();
@@ -10,8 +10,13 @@ export const linkRouter = Router();
 // Telegram bot mints codes for unlinked participants.
 linkRouter.post("/issue", requireBotToken(config.telegramBotApiToken), async (req, res) => {
   const body = IssueLinkBody.parse(req.body);
-  const result = await issueCode(body.telegram_user_id);
-  res.status(201).json(result);
+  try {
+    const result = await issueCode(body.telegram_user_id);
+    res.status(201).json(result);
+  } catch (err) {
+    if (err instanceof UserNotFound) return res.status(404).json({ error: "user_not_found" });
+    throw err;
+  }
 });
 
 // Discord bot redeems on /link.

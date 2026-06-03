@@ -4,6 +4,8 @@ import { prisma } from "../prisma.js";
 
 export class DiscordAlreadyLinked extends Error {}
 
+export class UserNotFound extends Error {}
+
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no ambiguous 0/O/1/I
 const EXPIRY_MS = 24 * 3600 * 1000;
 
@@ -14,6 +16,8 @@ export function generateCode(): string {
 }
 
 export async function issueCode(telegramUserId: bigint): Promise<{ code: string; expires_at: Date }> {
+  const user = await prisma.user.findUnique({ where: { telegramUserId } });
+  if (!user) throw new UserNotFound();
   const code = generateCode();
   const expiresAt = new Date(Date.now() + EXPIRY_MS);
   await prisma.linkCode.create({ data: { code, telegramUserId, expiresAt } });
