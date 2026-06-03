@@ -16,6 +16,22 @@ services:
     ports: ["127.0.0.1:6379:6379"]
     restart: unless-stopped
 
+  api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+    depends_on: [postgres, redis]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+      RECORDINGS_DIR: /var/lib/debates/recordings
+    env_file: .env
+    volumes:
+      - recordings:/var/lib/debates/recordings
+    ports: ["127.0.0.1:3000:3000"]
+    restart: unless-stopped
+
 volumes:
   pgdata:
   redisdata:
+  recordings:
