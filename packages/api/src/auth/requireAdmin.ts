@@ -9,12 +9,12 @@ declare global {
   }
 }
 
-/**
- * Admin guard. Real cookie/JWT verification is added in Task 7 (verifySession).
- * In tests (NODE_ENV==='test') it trusts the `x-test-admin-id` header so router
- * tests don't need a full login round-trip.
- */
-export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
+import { buildConfig } from "../config.js";
+import { SESSION_COOKIE, verifySession } from "./session.js";
+
+const config = buildConfig();
+
+export async function requireAdmin(req: Request, res: Response, next: NextFunction): Promise<void> {
   if (process.env.NODE_ENV === "test") {
     const id = req.header("x-test-admin-id");
     if (id) {
@@ -22,7 +22,15 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
       return next();
     }
   }
-  // Replaced/extended by real session verification in Task 7.
-  if (req.adminUserId) return next();
-  res.status(401).json({ error: "unauthorized" });
+  const token = (req as Request & { cookies?: Record<string, string> }).cookies?.[SESSION_COOKIE];
+  if (!token) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+  try {
+    req.adminUserId = await verifySession(token, config.jwtSecret);
+    next();
+  } catch {
+    res.status(401).json({ error: "unauthorized" });
+  }
 }
