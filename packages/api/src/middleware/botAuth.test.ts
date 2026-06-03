@@ -39,3 +39,19 @@ describe("requireBotToken", () => {
     expect(next).not.toHaveBeenCalled();
   });
 });
+
+describe("requireBotToken misconfiguration & robustness", () => {
+  it("throws at construction when the expected token is empty", () => {
+    expect(() => requireBotToken("")).toThrow();
+  });
+
+  it("returns 401 when the authorization header is an array", () => {
+    const mw = requireBotToken("secret-token-value");
+    const req = { headers: { authorization: ["Bearer secret-token-value"] } } as unknown as Request;
+    const res = mockRes();
+    const next = vi.fn();
+    mw(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(next).not.toHaveBeenCalled();
+  });
+});

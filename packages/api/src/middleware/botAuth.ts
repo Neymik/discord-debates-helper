@@ -10,8 +10,12 @@ function safeEqual(a: string, b: string): boolean {
 
 /** Guards bot-only endpoints by comparing the Bearer token to `expected`. */
 export function requireBotToken(expected: string) {
+  if (!expected) {
+    throw new Error("requireBotToken: expected token must be a non-empty string");
+  }
   return (req: Request, res: Response, next: NextFunction): void => {
-    const header = req.headers.authorization ?? "";
+    const raw = req.headers.authorization;
+    const header = typeof raw === "string" ? raw : "";
     const prefix = "Bearer ";
     if (!header.startsWith(prefix) || !safeEqual(header.slice(prefix.length), expected)) {
       res.status(401).json({ error: "unauthorized" });
