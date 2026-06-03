@@ -26,7 +26,7 @@ adminAuthRouter.post("/auth/telegram", async (req, res) => {
   const dbUser = await prisma.user.upsert({
     where: { telegramUserId: user.id },
     create: { telegramUserId: user.id, telegramUsername: user.username ?? null, displayName },
-    update: { telegramUsername: user.username ?? null },
+    update: { telegramUsername: user.username ?? null, displayName },
   });
   const token = await signSession(dbUser.id, config.jwtSecret);
   res.cookie(SESSION_COOKIE, token, {
