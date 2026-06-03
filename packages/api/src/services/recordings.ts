@@ -27,8 +27,9 @@ export async function createSession(input: {
   const id = crypto.randomUUID();
   const dirName = sessionDirName(new Date(), input.voiceChannelName, id);
   const fileDir = path.join(config.recordingsDir, dirName);
+  await mkdir(fileDir, { recursive: true }); // create the dir first; a failure here leaves no DB row
   try {
-    const session = await prisma.recordingSession.create({
+    return await prisma.recordingSession.create({
       data: {
         id,
         startedByDiscordUserId: input.startedByDiscordUserId,
@@ -39,8 +40,6 @@ export async function createSession(input: {
         status: "recording",
       },
     });
-    await mkdir(fileDir, { recursive: true });
-    return session;
   } catch (err) {
     // Partial unique index `one_active_recording_per_guild` (spec §3).
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
@@ -61,7 +60,7 @@ export async function registerFile(
   },
 ) {
   const user = await prisma.user.findUnique({ where: { discordUserId: body.discordUserId } });
-  return prisma.recordingFile.upsert({
+  const file = await prisma.recordingFile.upsert({
     where: { sessionId_discordUserId: { sessionId, discordUserId: body.discordUserId } },
     create: {
       sessionId,
@@ -78,6 +77,7 @@ export async function registerFile(
       discordUsername: body.discordUsername,
     },
   });
+  return { sessionId: file.sessionId, discordUserId: file.discordUserId };
 }
 
 export interface SessionMeta {
@@ -132,7 +132,11 @@ export async function completeSession(sessionId: string) {
       durationSec: f.durationSec,
     })),
   );
-  await writeFile(path.join(session.fileDir, "_metadata.json"), JSON.stringify(meta, null, 2));
+  try {
+    await writeFile(path.join(session.fileDir, "_metadata.json"), JSON.stringify(meta, null, 2));
+  } catch (err) {
+    console.error(`[api] failed to write _metadata.json for session ${sessionId}:`, err);
+  }
 
   return prisma.recordingSession.update({
     where: { id: sessionId },
