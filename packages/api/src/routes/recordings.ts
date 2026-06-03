@@ -76,7 +76,11 @@ recordingsRouter.get<{ id: string }>("/sessions/:id", requireAdmin, async (req, 
   if (!session) return res.status(404).json({ error: "not_found" });
   res.json({
     ...session,
-    files: session.files.map((f) => ({ ...f, sizeBytes: f.sizeBytes.toString() })),
+    files: session.files.map((f) => ({
+      ...f,
+      sizeBytes: f.sizeBytes.toString(),
+      user: f.user ? { ...f.user, telegramUserId: f.user.telegramUserId.toString() } : null,
+    })),
   });
 });
 
@@ -88,7 +92,15 @@ recordingsRouter.get<{ id: string; discordUserId: string }>("/sessions/:id/files
   if (!file) return res.status(404).json({ error: "not_found" });
   res.setHeader("Content-Type", "audio/ogg");
   res.setHeader("Content-Disposition", `attachment; filename="${path.basename(file.filePath)}"`);
-  createReadStream(path.join(file.session.fileDir, file.filePath)).pipe(res);
+  const stream = createReadStream(path.join(file.session.fileDir, file.filePath));
+  stream.on("error", (err: NodeJS.ErrnoException) => {
+    if (!res.headersSent) {
+      res.status(err.code === "ENOENT" ? 404 : 500).json({ error: err.code === "ENOENT" ? "file_not_found" : "read_error" });
+    } else {
+      res.destroy(err);
+    }
+  });
+  stream.pipe(res);
 });
 
 recordingsRouter.get<{ id: string }>("/sessions/:id/zip", requireAdmin, async (req, res) => {
@@ -101,6 +113,7 @@ recordingsRouter.get<{ id: string }>("/sessions/:id/zip", requireAdmin, async (r
   res.setHeader("Content-Disposition", `attachment; filename="session-${session.id}.zip"`);
   const archive = archiver("zip");
   archive.on("error", (e) => res.destroy(e));
+  archive.on("warning", (err) => console.warn(`[api] zip warning for session ${session.id}:`, err));
   archive.pipe(res);
   for (const f of session.files) {
     archive.file(path.join(session.fileDir, f.filePath), { name: f.filePath });
