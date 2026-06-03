@@ -59,6 +59,7 @@ model Game {
   createdBy     User              @relation("GameCreatedBy", fields: [createdById], references: [id])
   participants  GameParticipant[]
 
+  @@index([createdById])
   @@map("games")
 }
 
@@ -70,6 +71,7 @@ model GameParticipant {
   user    User    @relation(fields: [userId], references: [id])
 
   @@id([gameId, userId])
+  @@index([userId])
   @@map("game_participants")
 }
 
@@ -102,5 +104,6 @@ model RecordingFile {
   user            User?            @relation(fields: [userId], references: [id])
 
   @@id([sessionId, discordUserId])
+  @@index([userId])
   @@map("recording_files")
 }
