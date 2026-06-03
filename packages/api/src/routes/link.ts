@@ -2,7 +2,7 @@ import { Router } from "express";
 import { IssueLinkBody, RedeemLinkBody } from "@debates/shared";
 import { requireBotToken } from "../middleware/botAuth.js";
 import { buildConfig } from "../config.js";
-import { issueCode, redeemCode } from "../services/linkcodes.js";
+import { issueCode, redeemCode, DiscordAlreadyLinked } from "../services/linkcodes.js";
 
 const config = buildConfig();
 export const linkRouter = Router();
@@ -17,7 +17,14 @@ linkRouter.post("/issue", requireBotToken(config.telegramBotApiToken), async (re
 // Discord bot redeems on /link.
 linkRouter.post("/redeem", requireBotToken(config.discordBotApiToken), async (req, res) => {
   const body = RedeemLinkBody.parse(req.body);
-  const result = await redeemCode(body.code, body.discord_user_id, body.discord_username);
-  if (!result) return res.status(404).json({ error: "invalid_or_expired_code" });
-  res.json(result);
+  try {
+    const result = await redeemCode(body.code, body.discord_user_id, body.discord_username);
+    if (!result) return res.status(404).json({ error: "invalid_or_expired_code" });
+    res.json(result);
+  } catch (err) {
+    if (err instanceof DiscordAlreadyLinked) {
+      return res.status(409).json({ error: "discord_already_linked" });
+    }
+    throw err;
+  }
 });

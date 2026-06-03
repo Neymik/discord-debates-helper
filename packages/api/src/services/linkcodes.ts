@@ -1,5 +1,8 @@
 import { randomInt } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma.js";
+
+export class DiscordAlreadyLinked extends Error {}
 
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no ambiguous 0/O/1/I
 const EXPIRY_MS = 24 * 3600 * 1000;
@@ -27,10 +30,17 @@ export async function redeemCode(
     if (!row || row.usedAt || row.expiresAt < new Date()) return null;
 
     await tx.linkCode.update({ where: { code }, data: { usedAt: new Date() } });
-    const user = await tx.user.update({
-      where: { telegramUserId: row.telegramUserId },
-      data: { discordUserId },
-    });
-    return { telegram_user_id: Number(user.telegramUserId), display_name: user.displayName };
+    try {
+      const user = await tx.user.update({
+        where: { telegramUserId: row.telegramUserId },
+        data: { discordUserId },
+      });
+      return { telegram_user_id: Number(user.telegramUserId), display_name: user.displayName };
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        throw new DiscordAlreadyLinked();
+      }
+      throw err;
+    }
   });
 }

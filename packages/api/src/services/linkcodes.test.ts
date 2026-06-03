@@ -43,4 +43,15 @@ describe("issue + redeem", () => {
     await redeemCode(code, "disc-3", "us");
     expect(await redeemCode(code, "disc-4", "us")).toBeNull();
   });
+
+  it("throws DiscordAlreadyLinked when the discord id is linked to another user", async () => {
+    const { DiscordAlreadyLinked } = await import("./linkcodes.js");
+    await prisma.user.create({ data: { telegramUserId: 10n, displayName: "First", discordUserId: "dup" } });
+    await prisma.user.create({ data: { telegramUserId: 11n, displayName: "Second" } });
+    const { code } = await issueCode(11n);
+    await expect(redeemCode(code, "dup", "x")).rejects.toBeInstanceOf(DiscordAlreadyLinked);
+    // code NOT consumed (transaction rolled back)
+    const row = await prisma.linkCode.findUnique({ where: { code } });
+    expect(row?.usedAt).toBeNull();
+  });
 });
