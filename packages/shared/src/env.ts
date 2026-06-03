@@ -3,7 +3,19 @@ import { z } from "zod";
 const csvBigInts = z
   .string()
   .min(1)
-  .transform((s) => s.split(",").map((part) => BigInt(part.trim())));
+  .transform((s, ctx) => {
+    const out: bigint[] = [];
+    for (const part of s.split(",")) {
+      const trimmed = part.trim();
+      try {
+        out.push(BigInt(trimmed));
+      } catch {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `"${trimmed}" is not a valid integer` });
+        return z.NEVER;
+      }
+    }
+    return out;
+  });
 
 export const EnvSchema = z.object({
   DATABASE_URL: z.string().url(),

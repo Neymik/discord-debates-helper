@@ -32,4 +32,8 @@ describe("loadEnv", () => {
   it("rejects a JWT_SECRET shorter than 32 chars", () => {
     expect(() => loadEnv({ ...base, JWT_SECRET: "short" })).toThrow(/JWT_SECRET/);
   });
+
+  it("reports an invalid ADMIN_TELEGRAM_IDS via the aggregated error, not a raw throw", () => {
+    expect(() => loadEnv({ ...base, ADMIN_TELEGRAM_IDS: "abc,123" })).toThrow(/Invalid environment.*ADMIN_TELEGRAM_IDS/);
+  });
 });
