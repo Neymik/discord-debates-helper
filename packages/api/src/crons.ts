@@ -17,6 +17,7 @@ export async function cleanupOldRecordings(now = new Date()): Promise<number> {
   });
   for (const s of sessions) {
     await rm(s.fileDir, { recursive: true, force: true });
+    // dir removed before row; if we crash between the two, next run's force-rm + delete self-heals
     await prisma.recordingSession.delete({ where: { id: s.id } }); // cascades files
   }
   return sessions.length;
@@ -32,9 +33,19 @@ export async function reapStuckSessions(now = new Date()): Promise<number> {
   return result.count;
 }
 
-/** Registers the scheduled crons. Call once from server.ts. */
+/**
+ * Registers the scheduled crons. Call once from server.ts.
+ * NOTE: in-process, single-instance crons (phase-1, one container). Multiple
+ * replicas would need a distributed lock to avoid concurrent runs.
+ */
 export function startCrons(): void {
-  cron.schedule("0 4 * * *", () => void cleanupOldRecordings()); // daily 04:00
-  cron.schedule("*/15 * * * *", () => void reapStuckSessions()); // every 15 min
-  cron.schedule("0 * * * *", () => void reconcileJobs()); // hourly (reconcile safety net)
+  cron.schedule("0 4 * * *", () =>
+    cleanupOldRecordings().catch((err) => console.error("[cron] cleanupOldRecordings failed:", err)),
+  ); // daily 04:00
+  cron.schedule("*/15 * * * *", () =>
+    reapStuckSessions().catch((err) => console.error("[cron] reapStuckSessions failed:", err)),
+  ); // every 15 min
+  cron.schedule("0 * * * *", () =>
+    reconcileJobs().catch((err) => console.error("[cron] reconcileJobs failed:", err)),
+  ); // hourly reconcile safety net
 }
