@@ -7,7 +7,7 @@ RUN apk add --no-cache openssl libc6-compat
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/api/package.json packages/api/
-RUN npm ci
+RUN npm ci --ignore-scripts
 COPY packages/shared packages/shared
 COPY packages/api packages/api
 RUN npx prisma generate --schema packages/api/prisma/schema.prisma
@@ -22,7 +22,7 @@ RUN apk add --no-cache openssl libc6-compat
 COPY package.json package-lock.json ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/api/package.json packages/api/
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --ignore-scripts
 COPY --from=build /app/packages/shared/dist packages/shared/dist
 COPY --from=build /app/packages/api/dist packages/api/dist
 COPY --from=build /app/packages/api/prisma packages/api/prisma
