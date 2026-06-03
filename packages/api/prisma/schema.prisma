@@ -1,0 +1,106 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum GameStatus {
+  scheduled
+  cancelled
+}
+
+enum RecordingStatus {
+  recording
+  completed
+  failed
+}
+
+model User {
+  id                String    @id @default(uuid()) @db.Uuid
+  telegramUserId    BigInt    @unique @map("telegram_user_id")
+  telegramUsername  String?   @map("telegram_username")
+  discordUserId     String?   @unique @map("discord_user_id")
+  displayName       String    @map("display_name")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  linkCodes         LinkCode[]
+  createdGames      Game[]            @relation("GameCreatedBy")
+  participations    GameParticipant[]
+  recordingFiles    RecordingFile[]
+
+  @@map("users")
+}
+
+model LinkCode {
+  code            String    @id
+  telegramUserId  BigInt    @map("telegram_user_id")
+  expiresAt       DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt          DateTime? @map("used_at") @db.Timestamptz(6)
+
+  user            User      @relation(fields: [telegramUserId], references: [telegramUserId])
+
+  @@map("link_codes")
+}
+
+model Game {
+  id            String      @id @default(uuid()) @db.Uuid
+  scheduledAt   DateTime    @map("scheduled_at") @db.Timestamptz(6)
+  motion        String?
+  status        GameStatus  @default(scheduled)
+  createdById   String      @map("created_by") @db.Uuid
+  cancelledAt   DateTime?   @map("cancelled_at") @db.Timestamptz(6)
+  createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  createdBy     User              @relation("GameCreatedBy", fields: [createdById], references: [id])
+  participants  GameParticipant[]
+
+  @@map("games")
+}
+
+model GameParticipant {
+  gameId  String  @map("game_id") @db.Uuid
+  userId  String  @map("user_id") @db.Uuid
+
+  game    Game    @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@id([gameId, userId])
+  @@map("game_participants")
+}
+
+model RecordingSession {
+  id                     String          @id @default(uuid()) @db.Uuid
+  startedAt              DateTime        @default(now()) @map("started_at") @db.Timestamptz(6)
+  endedAt                DateTime?       @map("ended_at") @db.Timestamptz(6)
+  startedByDiscordUserId String          @map("started_by_discord_user_id")
+  voiceChannelId         String          @map("voice_channel_id")
+  voiceChannelName       String          @map("voice_channel_name")
+  guildId                String          @map("guild_id")
+  fileDir                String          @map("file_dir")
+  status                 RecordingStatus @default(recording)
+
+  files                  RecordingFile[]
+
+  @@map("recording_sessions")
+}
+
+model RecordingFile {
+  sessionId       String  @map("session_id") @db.Uuid
+  discordUserId   String  @map("discord_user_id")
+  userId          String? @map("user_id") @db.Uuid
+  discordUsername String  @map("discord_username")
+  filePath        String  @map("file_path")
+  durationSec     Int     @map("duration_sec")
+  sizeBytes       BigInt  @map("size_bytes")
+
+  session         RecordingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user            User?            @relation(fields: [userId], references: [id])
+
+  @@id([sessionId, discordUserId])
+  @@map("recording_files")
+}
