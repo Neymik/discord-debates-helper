@@ -49,4 +49,20 @@ describe("scheduler enqueue/remove", () => {
     const uniq = new Set(ids);
     expect(ids.length).toBe(uniq.size);
   });
+
+  it("attaches the announce payload only to the announce_t30 job", async () => {
+    const now = new Date();
+    const scheduledAt = new Date(now.getTime() + 31 * 60 * 1000); // 31 min out → announce_t30 (-30m) is +1m future, notify_t10 (-10m) is +21m
+    const announce = {
+      motion: "THW test",
+      participants: [{ display_name: "A", discord_user_id: "d1", telegram_username: "a_tg" }],
+    };
+    await enqueueGameJobs(gameId, scheduledAt, now, announce);
+    const delayed = await gameEventsQueue.getDelayed();
+    const mine = delayed.filter((j) => (j.id ?? "").startsWith(`game:${gameId}:`));
+    const announceJob = mine.find((j) => j.name === "announce_t30");
+    const t10Job = mine.find((j) => j.name === "notify_t10");
+    expect(announceJob?.data.announce).toEqual(announce);
+    expect(t10Job?.data.announce).toBeUndefined();
+  });
 });

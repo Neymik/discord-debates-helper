@@ -1,5 +1,5 @@
 import { prisma } from "../prisma.js";
-import { enqueueGameJobs, removeGameJobs, rescheduleGameJobs } from "../scheduler/scheduler.js";
+import { announceFromGame, enqueueGameJobs, removeGameJobs, rescheduleGameJobs } from "../scheduler/scheduler.js";
 
 export interface CreateGameInput {
   scheduledAt: Date;
@@ -16,9 +16,9 @@ export async function createGame(input: CreateGameInput) {
       createdById: input.createdById,
       participants: { create: input.participantUserIds.map((userId) => ({ userId })) },
     },
-    include: { participants: true },
+    include: { participants: { include: { user: true } } },
   });
-  await enqueueGameJobs(game.id, game.scheduledAt);
+  await enqueueGameJobs(game.id, game.scheduledAt, undefined, announceFromGame(game));
   return game;
 }
 
@@ -57,12 +57,12 @@ export async function updateGame(id: string, input: UpdateGameInput) {
     return tx.game.update({
       where: { id },
       data: { scheduledAt: input.scheduledAt, motion: input.motion },
-      include: { participants: true },
+      include: { participants: { include: { user: true } } },
     });
   });
 
   if (input.scheduledAt && input.scheduledAt.getTime() !== existing.scheduledAt.getTime()) {
-    await rescheduleGameJobs(id, game.scheduledAt);
+    await rescheduleGameJobs(id, game.scheduledAt, undefined, announceFromGame(game));
   }
   return game;
 }

@@ -3,20 +3,53 @@ import { prisma } from "../prisma.js";
 import { gameEventsQueue } from "../queue.js";
 import { jobsToEnqueue } from "./jobs.js";
 
+export interface AnnounceParticipant {
+  display_name: string;
+  discord_user_id: string | null;
+  telegram_username: string | null;
+}
+export interface AnnouncePayload {
+  motion: string | null;
+  participants: AnnounceParticipant[];
+}
 export interface GameEventPayload {
   gameId: string;
   type: JobType;
+  announce?: AnnouncePayload; // present ONLY on announce_t30 jobs
+}
+
+/** Builds the announce snapshot from a game with participants+users loaded. */
+export function announceFromGame(game: {
+  motion: string | null;
+  participants: { user: { displayName: string; discordUserId: string | null; telegramUsername: string | null } }[];
+}): AnnouncePayload {
+  return {
+    motion: game.motion,
+    participants: game.participants.map((p) => ({
+      display_name: p.user.displayName,
+      discord_user_id: p.user.discordUserId,
+      telegram_username: p.user.telegramUsername,
+    })),
+  };
 }
 
 /** Enqueue all (future-dated) notification jobs for a game. Idempotent. */
-export async function enqueueGameJobs(gameId: string, scheduledAt: Date, now = new Date()): Promise<void> {
+export async function enqueueGameJobs(
+  gameId: string,
+  scheduledAt: Date,
+  now = new Date(),
+  announce?: AnnouncePayload,
+): Promise<void> {
   const planned = jobsToEnqueue(gameId, scheduledAt, now);
   for (const job of planned) {
-    await gameEventsQueue.add(
-      job.type,
-      { gameId, type: job.type } satisfies GameEventPayload,
-      { jobId: job.jobId, delay: job.delayMs, removeOnComplete: true, removeOnFail: 1000 },
-    );
+    const data: GameEventPayload = { gameId, type: job.type };
+    if (job.type === "announce_t30" && announce) data.announce = announce;
+    await gameEventsQueue.add(job.type, data, {
+      jobId: job.jobId,
+      delay: job.delayMs,
+      removeOnComplete: true,
+      removeOnFail: 1000,
+    });
   }
 }
 
@@ -32,9 +65,14 @@ export async function removeGameJobs(gameId: string): Promise<void> {
 }
 
 /** Reschedule = remove then re-enqueue at the new offsets (applies the guard). */
-export async function rescheduleGameJobs(gameId: string, scheduledAt: Date, now = new Date()): Promise<void> {
+export async function rescheduleGameJobs(
+  gameId: string,
+  scheduledAt: Date,
+  now = new Date(),
+  announce?: AnnouncePayload,
+): Promise<void> {
   await removeGameJobs(gameId);
-  await enqueueGameJobs(gameId, scheduledAt, now);
+  await enqueueGameJobs(gameId, scheduledAt, now, announce);
 }
 
 /**
@@ -45,10 +83,10 @@ export async function rescheduleGameJobs(gameId: string, scheduledAt: Date, now 
 export async function reconcileJobs(now = new Date()): Promise<number> {
   const games = await prisma.game.findMany({
     where: { status: "scheduled", scheduledAt: { gt: now } },
-    select: { id: true, scheduledAt: true },
+    include: { participants: { include: { user: true } } },
   });
   for (const game of games) {
-    await enqueueGameJobs(game.id, game.scheduledAt, now);
+    await enqueueGameJobs(game.id, game.scheduledAt, now, announceFromGame(game));
   }
   return games.length;
 }
