@@ -31,6 +31,20 @@ services:
     ports: ["127.0.0.1:3000:3000"]
     restart: unless-stopped
 
+  discord-bot:
+    build:
+      context: .
+      dockerfile: packages/discord-bot/Dockerfile
+    depends_on: [api, redis]
+    environment:
+      REDIS_URL: redis://redis:6379
+      API_BASE_URL: http://api:3000
+      RECORDINGS_DIR: /var/lib/debates/recordings
+    env_file: .env
+    volumes:
+      - recordings:/var/lib/debates/recordings        # same volume as api (spec §9)
+    restart: unless-stopped
+
 volumes:
   pgdata:
   redisdata:
