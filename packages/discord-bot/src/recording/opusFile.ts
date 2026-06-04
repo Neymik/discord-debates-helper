@@ -1,6 +1,6 @@
 import { createWriteStream, type WriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
-import type { Readable } from "node:stream";
+import { Transform, type Readable } from "node:stream";
 import { opus } from "prism-media";
 
 /**
@@ -17,6 +17,7 @@ export class OpusFileWriter {
   private ogg: opus.OggLogicalBitstream | null = null;
   private pipelinePromise: Promise<void> | null = null;
   private bytesWritten = 0;
+  private audioPackets = 0;
 
   constructor(private readonly filePath: string) {}
 
@@ -27,23 +28,36 @@ export class OpusFileWriter {
     this.ogg = new opus.OggLogicalBitstream({
       opusHead: new opus.OpusHead({ channelCount: 2, sampleRate: 48000 }),
       pageSizeControl: { maxPackets: 10 },
+      crc: false,
     });
     // Track size as data flows to the file.
     this.ogg.on("data", (chunk: Buffer) => {
       this.bytesWritten += chunk.length;
     });
-    this.pipelinePromise = pipeline(opusPackets, this.ogg, this.fileStream);
+    // Count audio packets BEFORE the Ogg framer (each chunk is one Opus packet),
+    // so the empty-skip in stop() keys off real audio rather than the Ogg header.
+    const counter = new Transform({
+      transform: (chunk, _enc, cb) => {
+        this.audioPackets++;
+        cb(null, chunk);
+      },
+    });
+    this.pipelinePromise = pipeline(opusPackets, counter, this.ogg, this.fileStream);
   }
 
   /** Resolves once the underlying pipeline has fully flushed and closed. */
-  async finish(): Promise<{ bytesWritten: number }> {
-    if (!this.pipelinePromise) return { bytesWritten: 0 };
+  async finish(): Promise<{ bytesWritten: number; audioPackets: number }> {
+    if (!this.pipelinePromise) return { bytesWritten: 0, audioPackets: 0 };
     try {
       await this.pipelinePromise;
-    } catch {
-      // Stream ended (manual end / disconnect); partial file is still valid Ogg.
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== "ERR_STREAM_PREMATURE_CLOSE") {
+        console.error(`[discord-bot] opus pipeline error for ${this.filePath}:`, err);
+      }
+      // premature close (teardown) is expected for the abort path; partial Ogg is still valid.
     }
-    return { bytesWritten: this.bytesWritten };
+    return { bytesWritten: this.bytesWritten, audioPackets: this.audioPackets };
   }
 
   get path(): string {

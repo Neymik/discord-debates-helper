@@ -1,12 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { statSync } from "node:fs";
 import path from "node:path";
-import {
-  joinVoiceChannel,
-  EndBehaviorType,
-  getVoiceConnection,
-  type VoiceConnection,
-} from "@discordjs/voice";
+import { joinVoiceChannel, EndBehaviorType, type VoiceConnection } from "@discordjs/voice";
 import type { VoiceBasedChannel, TextBasedChannel } from "discord.js";
 import type { ApiClient } from "../apiClient.js";
 import type { BotConfig } from "../config.js";
@@ -21,7 +16,8 @@ interface UserCapture {
   fileName: string;
   discordUsername: string;
   startedAtMs: number;
-  finished: Promise<{ bytesWritten: number }>;
+  opusStream: import("node:stream").Readable;
+  finished: Promise<{ bytesWritten: number; audioPackets: number }>;
 }
 
 interface ActiveRecording {
@@ -91,6 +87,7 @@ export class RecordingManager {
         fileName,
         discordUsername: username,
         startedAtMs: Date.now(),
+        opusStream,
         finished: writer.finish(),
       });
     });
@@ -117,8 +114,7 @@ export class RecordingManager {
     if (!rec) return;
     clearTimeout(rec.warnTimer);
     clearTimeout(rec.stopTimer);
-    rec.connection.destroy();
-    getVoiceConnection(guildId)?.destroy();
+    if (rec.connection.state.status !== "destroyed") rec.connection.destroy();
     this.active.delete(guildId);
   }
 
@@ -132,21 +128,23 @@ export class RecordingManager {
     if (!rec) return null;
     clearTimeout(rec.warnTimer);
     clearTimeout(rec.stopTimer);
+    rec.connection.receiver.speaking.removeAllListeners(); // no new captures
 
-    // End every receive stream and let each writer flush its Ogg file.
-    rec.connection.receiver.speaking.removeAllListeners();
-    rec.connection.destroy();
+    // Gracefully end each receive stream so the Ogg _flush writes the final page.
+    for (const cap of rec.captures.values()) {
+      cap.opusStream.push(null);
+    }
 
     let totalDurationSec = 0;
     let speakerCount = 0;
     for (const [discordUserId, cap] of rec.captures) {
-      const { bytesWritten } = await cap.finished;
-      if (bytesWritten <= 0) continue; // skip empty files (spec §5 step 2: non-empty only)
-      let sizeBytes = bytesWritten;
+      const { audioPackets } = await cap.finished;
+      if (audioPackets === 0) continue; // no real audio → skip (spec §5 step 2)
+      let sizeBytes = 0;
       try {
         sizeBytes = statSync(cap.filePath).size;
       } catch {
-        /* keep the in-memory count */
+        sizeBytes = 0;
       }
       const durationSec = Math.max(0, Math.round((Date.now() - cap.startedAtMs) / 1000));
       totalDurationSec = Math.max(totalDurationSec, durationSec);
@@ -164,6 +162,7 @@ export class RecordingManager {
       );
     }
 
+    rec.connection.destroy(); // cleanup (streams already ended above)
     await retryWithBackoff(() => this.api.completeSession(rec.sessionId), BACKOFF);
     this.active.delete(guildId);
     return { speakerCount, totalDurationSec };
