@@ -11,6 +11,7 @@ export interface BotConfig {
   fallbackChannelId: string;
   redisUrl: string;
   maxSessionHours: number;
+  announceEnabled: boolean;
 }
 
 /**
@@ -31,5 +32,8 @@ export function buildBotConfig(source: Record<string, string | undefined> = proc
     fallbackChannelId: env.DEBATE_FALLBACK_CHANNEL_ID,
     redisUrl: env.REDIS_URL,
     maxSessionHours: env.MAX_SESSION_HOURS,
+    // The pre-debate "starts in 30 min" announcer. On by default; set
+    // ANNOUNCE_ENABLED=false to silence it (bot-local, not in the shared schema).
+    announceEnabled: source.ANNOUNCE_ENABLED !== "false",
   };
 }

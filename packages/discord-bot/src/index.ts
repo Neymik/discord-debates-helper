@@ -19,7 +19,11 @@ async function main(): Promise<void> {
 
   client.once(Events.ClientReady, (c) => {
     console.log(`[discord-bot] logged in as ${c.user.tag}`);
-    startAnnounceWorker(client, cfg);
+    if (cfg.announceEnabled) {
+      startAnnounceWorker(client, cfg);
+    } else {
+      console.warn("[discord-bot] announce worker disabled (ANNOUNCE_ENABLED=false)");
+    }
   });
 
   client.on(Events.InteractionCreate, async (interaction) => {

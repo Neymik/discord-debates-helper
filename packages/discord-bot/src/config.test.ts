@@ -40,4 +40,10 @@ describe("buildBotConfig", () => {
     const cfg = buildBotConfig({ ...base, DISCORD_GUILD_ID: "5550001" });
     expect(cfg.guildId).toBe("5550001");
   });
+
+  it("enables the announce worker by default and disables it only on ANNOUNCE_ENABLED=false", () => {
+    expect(buildBotConfig(base).announceEnabled).toBe(true);
+    expect(buildBotConfig({ ...base, ANNOUNCE_ENABLED: "true" }).announceEnabled).toBe(true);
+    expect(buildBotConfig({ ...base, ANNOUNCE_ENABLED: "false" }).announceEnabled).toBe(false);
+  });
 });
