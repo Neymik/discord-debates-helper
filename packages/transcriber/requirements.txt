@@ -1,0 +1,5 @@
+# huggingface-hub is pinned to 0.x: faster-whisper 1.0.3 imports `requests` and
+# uses the pre-1.0 hf-hub download API. hf-hub 1.x dropped `requests` and changed
+# that API, which breaks faster-whisper 1.0.3 at import and at model download.
+faster-whisper==1.0.3
+huggingface-hub==0.25.2

@@ -45,7 +45,29 @@ services:
       - recordings:/var/lib/debates/recordings        # same volume as api (spec §9)
     restart: unless-stopped
 
+  # Run-once tool (profile `tools`, not started by `up`). Transcribes a session:
+  #   docker compose run --rm transcriber <session-dir-name>
+  # Local dev (api/bot native, files in host /tmp/debates-recordings):
+  #   RECORDINGS_SOURCE=/tmp/debates-recordings docker compose run --rm transcriber <dir>
+  transcriber:
+    build:
+      context: packages/transcriber
+      dockerfile: Dockerfile
+    profiles: ["tools"]
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-large-v3}
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-ru}
+      RECORDINGS_DIR: /recordings
+      WHISPER_DOWNLOAD_ROOT: /models
+      HF_HOME: /models
+    volumes:
+      - ${RECORDINGS_SOURCE:-recordings}:/recordings   # named volume (prod) or host bind (dev)
+      - whisper-models:/models                         # ~3GB large-v3, downloaded once
+
 volumes:
   pgdata:
   redisdata:
   recordings:
+  whisper-models:
