@@ -28,7 +28,11 @@ export class OpusFileWriter {
     this.ogg = new opus.OggLogicalBitstream({
       opusHead: new opus.OpusHead({ channelCount: 2, sampleRate: 48000 }),
       pageSizeControl: { maxPackets: 10 },
-      crc: false,
+      // CRC MUST stay on: with crc:false prism writes a zeroed checksum into every
+      // Ogg page header, producing a technically-invalid stream that strict decoders
+      // (ffmpeg) reject with "CRC mismatch". prism computes the checksum via the
+      // native `node-crc` package (a direct dependency), so leave crc enabled.
+      crc: true,
     });
     // Track size as data flows to the file.
     this.ogg.on("data", (chunk: Buffer) => {
