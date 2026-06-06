@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Prisma } from "@prisma/client";
+import type { RecordingSegment } from "@debates/shared";
 import { prisma } from "../prisma.js";
 import { buildConfig } from "../config.js";
 
@@ -57,9 +58,11 @@ export async function registerFile(
     filePath: string;
     durationSec: number;
     sizeBytes: number;
+    segments: RecordingSegment[];
   },
 ) {
   const user = await prisma.user.findUnique({ where: { discordUserId: body.discordUserId } });
+  const segments = body.segments as unknown as Prisma.InputJsonValue;
   const file = await prisma.recordingFile.upsert({
     where: { sessionId_discordUserId: { sessionId, discordUserId: body.discordUserId } },
     create: {
@@ -70,11 +73,13 @@ export async function registerFile(
       filePath: body.filePath,
       durationSec: body.durationSec,
       sizeBytes: BigInt(body.sizeBytes),
+      segments,
     },
     update: {
       durationSec: body.durationSec,
       sizeBytes: BigInt(body.sizeBytes),
       discordUsername: body.discordUsername,
+      segments,
     },
   });
   return { sessionId: file.sessionId, discordUserId: file.discordUserId };
@@ -94,6 +99,7 @@ export interface FileMeta {
   displayName: string | null;
   filePath: string;
   durationSec: number;
+  segments: RecordingSegment[];
 }
 
 export function buildMetadata(session: SessionMeta, files: FileMeta[]) {
@@ -109,6 +115,7 @@ export function buildMetadata(session: SessionMeta, files: FileMeta[]) {
       display_name: f.displayName,
       file: f.filePath,
       duration_sec: f.durationSec,
+      segments: f.segments,
     })),
   };
 }
@@ -130,6 +137,7 @@ export async function completeSession(sessionId: string) {
       displayName: f.user?.displayName ?? null,
       filePath: f.filePath,
       durationSec: f.durationSec,
+      segments: (f.segments as unknown as RecordingSegment[] | null) ?? [],
     })),
   );
   try {

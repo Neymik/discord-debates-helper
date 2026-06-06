@@ -10,6 +10,13 @@ import { recordingFileName } from "./filename.js";
 import { retryWithBackoff } from "../lib/backoff.js";
 import { capTimings } from "./caps.js";
 
+/** One contiguous speaking burst (internal, camelCase; mapped to snake_case at registerFile). */
+interface BurstSegment {
+  wallMs: number; // offset from session start
+  audioOffsetMs: number; // talk-time written into this user's file when the burst began
+  durationMs: number; // wall-clock length of the burst
+}
+
 interface UserCapture {
   writer: OpusFileWriter;
   filePath: string;
@@ -18,6 +25,8 @@ interface UserCapture {
   startedAtMs: number;
   opusStream: import("node:stream").Readable;
   finished: Promise<{ bytesWritten: number; audioPackets: number }>;
+  segments: BurstSegment[];
+  openSegment: { wallMs: number; audioOffsetMs: number } | null; // burst in progress, if any
 }
 
 interface ActiveRecording {
@@ -25,6 +34,7 @@ interface ActiveRecording {
   fileDir: string;
   guildId: string;
   voiceChannelName: string;
+  sessionStartedAtMs: number;
   connection: VoiceConnection;
   captures: Map<string, UserCapture>; // keyed by discord user id
   warnTimer: NodeJS.Timeout;
@@ -57,6 +67,7 @@ export class RecordingManager {
     onAutoStop: () => void,
   ): Promise<void> {
     const guildId = voiceChannel.guild.id;
+    const sessionStartedAtMs = Date.now();
     await mkdir(session.fileDir, { recursive: true });
 
     const connection = joinVoiceChannel({
@@ -70,26 +81,51 @@ export class RecordingManager {
     const captures = new Map<string, UserCapture>();
     const receiver = connection.receiver;
 
+    // A user's file + subscription opens on their first burst; every later burst
+    // (re)opens a segment. The Manual subscription stays open for the whole
+    // session, so all of a user's bursts concatenate into one compacted file.
     receiver.speaking.on("start", (userId: string) => {
-      if (captures.has(userId)) return; // already capturing this user
-      const member = voiceChannel.members.get(userId);
-      const username = member?.user.username ?? "user";
-      const fileName = recordingFileName(username, userId);
-      const filePath = path.join(session.fileDir, fileName);
-      const opusStream = receiver.subscribe(userId, {
-        end: { behavior: EndBehaviorType.Manual }, // we end it ourselves on /record stop
+      const nowMs = Date.now() - sessionStartedAtMs;
+      let cap = captures.get(userId);
+      if (!cap) {
+        const member = voiceChannel.members.get(userId);
+        const username = member?.user.username ?? "user";
+        const fileName = recordingFileName(username, userId);
+        const filePath = path.join(session.fileDir, fileName);
+        const opusStream = receiver.subscribe(userId, {
+          end: { behavior: EndBehaviorType.Manual }, // we end it ourselves on /record stop
+        });
+        const writer = new OpusFileWriter(filePath);
+        writer.start(opusStream);
+        cap = {
+          writer,
+          filePath,
+          fileName,
+          discordUsername: username,
+          startedAtMs: Date.now(),
+          opusStream,
+          finished: writer.finish(),
+          segments: [],
+          openSegment: null,
+        };
+        captures.set(userId, cap);
+      }
+      // Open a burst anchored to the current talk-time offset in this user's file.
+      if (!cap.openSegment) {
+        cap.openSegment = { wallMs: nowMs, audioOffsetMs: cap.writer.audioMs() };
+      }
+    });
+
+    receiver.speaking.on("end", (userId: string) => {
+      const cap = captures.get(userId);
+      if (!cap?.openSegment) return;
+      const endMs = Date.now() - sessionStartedAtMs;
+      cap.segments.push({
+        wallMs: cap.openSegment.wallMs,
+        audioOffsetMs: cap.openSegment.audioOffsetMs,
+        durationMs: Math.max(0, endMs - cap.openSegment.wallMs),
       });
-      const writer = new OpusFileWriter(filePath);
-      writer.start(opusStream);
-      captures.set(userId, {
-        writer,
-        filePath,
-        fileName,
-        discordUsername: username,
-        startedAtMs: Date.now(),
-        opusStream,
-        finished: writer.finish(),
-      });
+      cap.openSegment = null;
     });
 
     const { warnAfterMs, stopAfterMs } = capTimings(this.cfg.maxSessionHours);
@@ -101,6 +137,7 @@ export class RecordingManager {
       fileDir: session.fileDir,
       guildId,
       voiceChannelName: voiceChannel.name,
+      sessionStartedAtMs,
       connection,
       captures,
       warnTimer,
@@ -128,7 +165,21 @@ export class RecordingManager {
     if (!rec) return null;
     clearTimeout(rec.warnTimer);
     clearTimeout(rec.stopTimer);
-    rec.connection.receiver.speaking.removeAllListeners(); // no new captures
+    rec.connection.receiver.speaking.removeAllListeners(); // no new captures or burst events
+
+    // Close any burst still open at stop time (the speaker was talking when /record
+    // stop fired, so no `end` event will arrive).
+    const stopWallMs = Date.now() - rec.sessionStartedAtMs;
+    for (const cap of rec.captures.values()) {
+      if (cap.openSegment) {
+        cap.segments.push({
+          wallMs: cap.openSegment.wallMs,
+          audioOffsetMs: cap.openSegment.audioOffsetMs,
+          durationMs: Math.max(0, stopWallMs - cap.openSegment.wallMs),
+        });
+        cap.openSegment = null;
+      }
+    }
 
     // Gracefully end each receive stream so the Ogg _flush writes the final page.
     for (const cap of rec.captures.values()) {
@@ -157,6 +208,11 @@ export class RecordingManager {
             file_path: cap.fileName, // relative to session.file_dir (spec §3 recording_files.file_path)
             duration_sec: durationSec,
             size_bytes: sizeBytes,
+            segments: cap.segments.map((s) => ({
+              wall_ms: s.wallMs,
+              audio_offset_ms: s.audioOffsetMs,
+              duration_ms: s.durationMs,
+            })),
           }),
         BACKOFF,
       );

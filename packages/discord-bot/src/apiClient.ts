@@ -64,6 +64,7 @@ export class ApiClient {
       file_path: string;
       duration_sec: number;
       size_bytes: number;
+      segments: { wall_ms: number; audio_offset_ms: number; duration_ms: number }[];
     },
   ): Promise<void> {
     const res = await this.post(`/api/recordings/sessions/${sessionId}/files`, input);

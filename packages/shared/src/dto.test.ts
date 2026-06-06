@@ -42,6 +42,29 @@ describe("RegisterRecordingFileBody", () => {
       }),
     ).toThrow();
   });
+
+  it("defaults segments to [] when omitted (backward compatible)", () => {
+    const parsed = RegisterRecordingFileBody.parse({
+      discord_user_id: "1",
+      discord_username: "alice",
+      file_path: "alice_2211.opus",
+      duration_sec: 10,
+      size_bytes: 10,
+    });
+    expect(parsed.segments).toEqual([]);
+  });
+
+  it("parses a burst timeline", () => {
+    const parsed = RegisterRecordingFileBody.parse({
+      discord_user_id: "1",
+      discord_username: "alice",
+      file_path: "alice_2211.opus",
+      duration_sec: 10,
+      size_bytes: 10,
+      segments: [{ wall_ms: 0, audio_offset_ms: 0, duration_ms: 7200 }],
+    });
+    expect(parsed.segments[0]).toEqual({ wall_ms: 0, audio_offset_ms: 0, duration_ms: 7200 });
+  });
 });
 
 describe("RedeemLinkBody", () => {

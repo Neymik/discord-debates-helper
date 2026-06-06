@@ -99,6 +99,9 @@ model RecordingFile {
   filePath        String  @map("file_path")
   durationSec     Int     @map("duration_sec")
   sizeBytes       BigInt  @map("size_bytes")
+  // Per-burst speaking timeline: [{ wall_ms, audio_offset_ms, duration_ms }, ...].
+  // Defaults to [] so pre-timeline rows and callers stay valid.
+  segments        Json    @default("[]") @db.JsonB @map("segments")
 
   session         RecordingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   user            User?            @relation(fields: [userId], references: [id])

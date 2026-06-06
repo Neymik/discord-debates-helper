@@ -67,4 +67,13 @@ export class OpusFileWriter {
   get path(): string {
     return this.filePath;
   }
+
+  /**
+   * Talk-time written so far, in ms. Discord Opus frames are 20 ms each, and the
+   * compacted file omits silence, so packets×20 equals the current playback
+   * offset inside the .ogg — used to anchor each speaking burst's audio_offset_ms.
+   */
+  audioMs(): number {
+    return this.audioPackets * 20;
+  }
 }

@@ -67,6 +67,7 @@ describe("OpusFileWriter", () => {
     writer.start(src);
     const { audioPackets } = await writer.finish();
     expect(audioPackets).toBe(5);
+    expect(writer.audioMs()).toBe(100); // 5 packets × 20 ms — anchors burst audio_offset_ms
     expect(existsSync(filePath)).toBe(true);
     expect(statSync(filePath).size).toBeGreaterThan(110); // > 2 header pages
   });

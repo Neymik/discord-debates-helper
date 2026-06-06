@@ -40,6 +40,7 @@ recordingsRouter.post<{ id: string }>("/sessions/:id/files", requireBotToken(con
     filePath: body.file_path,
     durationSec: body.duration_sec,
     sizeBytes: body.size_bytes,
+    segments: body.segments,
   });
   res.status(201).json({ session_id: file.sessionId, discord_user_id: file.discordUserId });
 });

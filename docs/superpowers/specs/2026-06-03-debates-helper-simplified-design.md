@@ -112,6 +112,7 @@ recording_files
 ├── file_path                 text          NOT NULL                     -- relative to session.file_dir
 ├── duration_sec              integer       NOT NULL
 ├── size_bytes                bigint        NOT NULL
+├── segments                  jsonb         NOT NULL DEFAULT '[]'        -- per-burst speaking timeline (see §5)
 └── PRIMARY KEY (session_id, discord_user_id)
 ```
 
@@ -184,7 +185,7 @@ Recording is **fully independent of games** in phase 1. `/record start` does not
 1. Bot ends all per-user streams, closes the voice connection.
 2. For each non-empty `.opus` file, bot calls
    `POST /api/recordings/sessions/{id}/files`
-   with `{ discord_user_id, discord_username, file_path, duration_sec, size_bytes }`.
+   with `{ discord_user_id, discord_username, file_path, duration_sec, size_bytes, segments }`.
    *(File bytes already on disk via the shared Docker volume — no upload of bytes.)*
 3. API writes `recording_files` rows. Resolves `discord_user_id → user_id` via `users` (NULL if unlinked).
 4. API calls `POST /api/recordings/sessions/{id}/complete`.
@@ -202,11 +203,25 @@ Recording is **fully independent of games** in phase 1. `/record start` does not
          "telegram_user_id": 123456,
          "display_name": "Alice K.",
          "file": "alice_2211.opus",
-         "duration_sec": 412
+         "duration_sec": 412,
+         "segments": [
+           { "wall_ms": 0, "audio_offset_ms": 0, "duration_ms": 7200 },
+           { "wall_ms": 15400, "audio_offset_ms": 7200, "duration_ms": 3100 }
+         ]
        }
      ]
    }
    ```
+   **Speaking timeline (`segments`).** Each speaker's `.opus` file is *compacted* — Discord
+   only emits Opus packets while that person is talking, so silence gaps are dropped and a
+   file's internal clock measures talk-time, not wall-clock. To reconstruct cross-speaker turn
+   order (*"who spoke after whom"*) the bot records one entry per contiguous speaking burst:
+   `wall_ms` is the burst's start offset from `started_at`; `audio_offset_ms` is where that
+   burst sits inside the compacted file; `duration_ms` is the burst's wall-clock length. A
+   transcription pipeline maps each Whisper segment's file-relative time `t` to wall-clock via
+   `wall_ms + (t − audio_offset_ms)` for the burst that contains `t`, then merges all speakers
+   and sorts by wall-clock. Attribution alone needs no timeline (one file per speaker); the
+   timeline is what makes a single globally-ordered transcript possible.
 6. API sets `recording_sessions.status = completed`, `ended_at = now()`.
 7. Bot replies in the originating text channel:
    *"Recorded {N} speakers, {total_duration}. See admin panel for download."*
