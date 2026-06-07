@@ -43,6 +43,9 @@ interface ActiveRecording {
 
 const BACKOFF = { baseMs: 1000, capMs: 60_000, totalBudgetMs: 3_600_000 };
 
+/** The file-registration payload, sourced from ApiClient so the two never drift. */
+type RegisterFileInput = Parameters<ApiClient["registerFile"]>[1];
+
 export class RecordingManager {
   private readonly active = new Map<string, ActiveRecording>();
 
@@ -156,13 +159,18 @@ export class RecordingManager {
   }
 
   /**
-   * Ends all streams, closes the connection, registers each non-empty file with
-   * exponential backoff (spec §5: up to ~1h), then completes the session.
-   * Returns the speaker count + total duration for the reply.
+   * Ends all streams and frees the guild (voice connection + in-memory state)
+   * IMMEDIATELY, then registers files + completes the session in the background
+   * with exponential backoff (spec §5: up to ~1h). Freeing first is what keeps a
+   * slow or failed backend from wedging the per-guild lock or stalling the Discord
+   * interaction reply (which previously expired the interaction token → 10062, and
+   * left the session stuck at status='recording'). Returns speaker count + total
+   * duration for the reply (files are on disk; persistence is resilient/async).
    */
   async stop(guildId: string): Promise<{ speakerCount: number; totalDurationSec: number } | null> {
     const rec = this.active.get(guildId);
     if (!rec) return null;
+    this.active.delete(guildId); // release the in-memory per-guild lock up front
     clearTimeout(rec.warnTimer);
     clearTimeout(rec.stopTimer);
     rec.connection.receiver.speaking.removeAllListeners(); // no new captures or burst events
@@ -186,8 +194,9 @@ export class RecordingManager {
       cap.opusStream.push(null);
     }
 
+    // Finalize each file (await the flush) and build registration payloads.
     let totalDurationSec = 0;
-    let speakerCount = 0;
+    const files: RegisterFileInput[] = [];
     for (const [discordUserId, cap] of rec.captures) {
       const { audioPackets } = await cap.finished;
       if (audioPackets === 0) continue; // no real audio → skip (spec §5 step 2)
@@ -199,28 +208,39 @@ export class RecordingManager {
       }
       const durationSec = Math.max(0, Math.round((Date.now() - cap.startedAtMs) / 1000));
       totalDurationSec = Math.max(totalDurationSec, durationSec);
-      speakerCount++;
-      await retryWithBackoff(
-        () =>
-          this.api.registerFile(rec.sessionId, {
-            discord_user_id: discordUserId,
-            discord_username: cap.discordUsername,
-            file_path: cap.fileName, // relative to session.file_dir (spec §3 recording_files.file_path)
-            duration_sec: durationSec,
-            size_bytes: sizeBytes,
-            segments: cap.segments.map((s) => ({
-              wall_ms: s.wallMs,
-              audio_offset_ms: s.audioOffsetMs,
-              duration_ms: s.durationMs,
-            })),
-          }),
-        BACKOFF,
-      );
+      files.push({
+        discord_user_id: discordUserId,
+        discord_username: cap.discordUsername,
+        file_path: cap.fileName, // relative to session.file_dir (spec §3 recording_files.file_path)
+        duration_sec: durationSec,
+        size_bytes: sizeBytes,
+        segments: cap.segments.map((s) => ({
+          wall_ms: s.wallMs,
+          audio_offset_ms: s.audioOffsetMs,
+          duration_ms: s.durationMs,
+        })),
+      });
     }
 
-    rec.connection.destroy(); // cleanup (streams already ended above)
-    await retryWithBackoff(() => this.api.completeSession(rec.sessionId), BACKOFF);
-    this.active.delete(guildId);
-    return { speakerCount, totalDurationSec };
+    try {
+      rec.connection.destroy(); // cleanup (streams already ended above)
+    } catch {
+      /* already destroyed */
+    }
+
+    // Persist out-of-band so the long backoff never blocks the reply or the guild.
+    void this.persist(rec.sessionId, files).catch((err) =>
+      console.error(`[discord-bot] persist failed for session ${rec.sessionId}:`, err),
+    );
+
+    return { speakerCount: files.length, totalDurationSec };
+  }
+
+  /** Registers each file then completes the session, each with backoff (spec §5). */
+  private async persist(sessionId: string, files: RegisterFileInput[]): Promise<void> {
+    for (const f of files) {
+      await retryWithBackoff(() => this.api.registerFile(sessionId, f), BACKOFF);
+    }
+    await retryWithBackoff(() => this.api.completeSession(sessionId), BACKOFF);
   }
 }
