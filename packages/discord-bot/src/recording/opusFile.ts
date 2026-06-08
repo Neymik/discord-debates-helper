@@ -4,6 +4,15 @@ import { Transform, type Readable } from "node:stream";
 import { opus } from "prism-media";
 
 /**
+ * Upper bound on a single Discord Opus packet. Discord voice is 48 kHz, 20 ms
+ * single-frame packets; even at the Opus ceiling a 20 ms frame is ≤1275 bytes
+ * (RFC 6716). Anything larger is truncation/concatenation garbage, not real
+ * audio, so we drop it rather than let it poison the Ogg stream. The bound is
+ * deliberately generous (≈2× the theoretical max) to never drop a legit packet.
+ */
+const MAX_OPUS_PACKET_BYTES = 3000;
+
+/**
  * Repackages a stream of raw Opus packets (from @discordjs/voice
  * `receiver.subscribe`) into an Ogg/Opus file WITHOUT re-encoding.
  *
@@ -18,6 +27,7 @@ export class OpusFileWriter {
   private pipelinePromise: Promise<void> | null = null;
   private bytesWritten = 0;
   private audioPackets = 0;
+  private droppedPackets = 0;
 
   constructor(private readonly filePath: string) {}
 
@@ -38,20 +48,39 @@ export class OpusFileWriter {
     this.ogg.on("data", (chunk: Buffer) => {
       this.bytesWritten += chunk.length;
     });
-    // Count audio packets BEFORE the Ogg framer (each chunk is one Opus packet),
-    // so the empty-skip in stop() keys off real audio rather than the Ogg header.
+    // Drop structurally-corrupt packets BEFORE they reach the Ogg framer. A
+    // single empty or oversized buffer written as an Opus packet yields a stream
+    // that strict decoders (ffmpeg / faster-whisper) reject outright — bailing on
+    // the first bad packet and discarding the *entire* speaker's audio (this is
+    // exactly how a track silently came back with 0 transcript segments). We can
+    // only catch framing-level garbage here, not codec-level rot, but dropping it
+    // keeps the rest of the track decodable instead of losing all of it.
+    const sanitizer = new Transform({
+      transform: (chunk: Buffer, _enc, cb) => {
+        if (!Buffer.isBuffer(chunk) || chunk.length === 0 || chunk.length > MAX_OPUS_PACKET_BYTES) {
+          this.droppedPackets++;
+          cb(); // swallow the packet — emit nothing downstream
+          return;
+        }
+        cb(null, chunk);
+      },
+    });
+    // Count audio packets AFTER the sanitizer but BEFORE the Ogg framer (each
+    // surviving chunk is one Opus packet), so audioMs() and the empty-skip in
+    // stop() key off real, kept audio rather than the Ogg header or dropped junk.
     const counter = new Transform({
       transform: (chunk, _enc, cb) => {
         this.audioPackets++;
         cb(null, chunk);
       },
     });
-    this.pipelinePromise = pipeline(opusPackets, counter, this.ogg, this.fileStream);
+    this.pipelinePromise = pipeline(opusPackets, sanitizer, counter, this.ogg, this.fileStream);
   }
 
   /** Resolves once the underlying pipeline has fully flushed and closed. */
-  async finish(): Promise<{ bytesWritten: number; audioPackets: number }> {
-    if (!this.pipelinePromise) return { bytesWritten: 0, audioPackets: 0 };
+  async finish(): Promise<{ bytesWritten: number; audioPackets: number; droppedPackets: number }> {
+    if (!this.pipelinePromise)
+      return { bytesWritten: 0, audioPackets: 0, droppedPackets: this.droppedPackets };
     try {
       await this.pipelinePromise;
     } catch (err) {
@@ -61,7 +90,17 @@ export class OpusFileWriter {
       }
       // premature close (teardown) is expected for the abort path; partial Ogg is still valid.
     }
-    return { bytesWritten: this.bytesWritten, audioPackets: this.audioPackets };
+    if (this.droppedPackets > 0) {
+      console.warn(
+        `[discord-bot] dropped ${this.droppedPackets} corrupt opus packet(s) for ${this.filePath} ` +
+          `(kept ${this.audioPackets})`,
+      );
+    }
+    return {
+      bytesWritten: this.bytesWritten,
+      audioPackets: this.audioPackets,
+      droppedPackets: this.droppedPackets,
+    };
   }
 
   get path(): string {

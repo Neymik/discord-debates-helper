@@ -91,4 +91,41 @@ describe("OpusFileWriter", () => {
     const { audioPackets } = await writer.finish();
     expect(audioPackets).toBe(0);
   });
+
+  it("drops zero-length packets so they cannot poison the Ogg stream", async () => {
+    const filePath = path.join(dir, "drop-empty.ogg");
+    const writer = new OpusFileWriter(filePath);
+    // Interleave empty buffers (a known corrupt-packet shape) between real ones.
+    writer.start(
+      Readable.from([
+        Buffer.alloc(80, 1),
+        Buffer.alloc(0),
+        Buffer.alloc(80, 2),
+        Buffer.alloc(0),
+        Buffer.alloc(80, 3),
+      ]),
+    );
+    const { audioPackets, droppedPackets } = await writer.finish();
+    expect(audioPackets).toBe(3); // only the real packets reach the framer
+    expect(droppedPackets).toBe(2);
+    expect(writer.audioMs()).toBe(60); // talk-time counts kept packets only
+    // Stream must still be byte-valid (every page CRC matches).
+    expect(assertValidOggCrcs(readFileSync(filePath))).toBeGreaterThan(2);
+  });
+
+  it("drops oversized packets (truncation/concatenation garbage)", async () => {
+    const filePath = path.join(dir, "drop-oversized.ogg");
+    const writer = new OpusFileWriter(filePath);
+    writer.start(
+      Readable.from([
+        Buffer.alloc(80, 1),
+        Buffer.alloc(64_000, 9), // far beyond any real 20 ms Opus packet
+        Buffer.alloc(80, 2),
+      ]),
+    );
+    const { audioPackets, droppedPackets } = await writer.finish();
+    expect(audioPackets).toBe(2);
+    expect(droppedPackets).toBe(1);
+    expect(assertValidOggCrcs(readFileSync(filePath))).toBeGreaterThan(2);
+  });
 });
