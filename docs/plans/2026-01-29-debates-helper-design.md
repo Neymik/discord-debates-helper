@@ -99,7 +99,7 @@ GameParticipant
 ├── gameId
 ├── userId
 ├── team (government | opposition)
-├── speakingOrder (1, 2, 3... player may appear twice)
+├── speakingOrder (jsonb int array: positions in the speech sequence; a player may appear more than once for uneven teams)
 ├── speechRecordings (jsonb array: [{order, audioUrl, transcription}])
 ├── aiAnalysis (jsonb: rank, relativeScore, categories, analysis)
 ├── aiFeedback (text sent to Telegram)
@@ -303,7 +303,7 @@ Output (relative scoring within game):
   "winner": "opposition",
   "speakers": [
     {
-      "oderId": "...",
+      "userId": "...",
       "rank": 1,
       "relativeScore": 95,
       "categories": {

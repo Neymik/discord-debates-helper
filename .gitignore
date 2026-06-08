@@ -4,4 +4,5 @@ dist/
 .env
 recordings/
 records/
+backup/
 coverage/
