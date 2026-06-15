@@ -9,11 +9,11 @@ export async function handleRecord(
   interaction: ChatInputCommandInteraction,
   api: ApiClient,
   manager: RecordingManager,
-  _cfg: BotConfig,
+  cfg: BotConfig,
 ): Promise<void> {
   const sub = interaction.options.getSubcommand();
   if (sub === "start") return handleStart(interaction, api, manager);
-  if (sub === "stop") return handleStop(interaction, manager);
+  if (sub === "stop") return handleStop(interaction, manager, cfg);
 }
 
 async function handleStart(
@@ -77,21 +77,36 @@ async function handleStart(
   }
 }
 
-async function handleStop(interaction: ChatInputCommandInteraction, manager: RecordingManager): Promise<void> {
+async function handleStop(
+  interaction: ChatInputCommandInteraction,
+  manager: RecordingManager,
+  cfg: BotConfig,
+): Promise<void> {
   const guildId = interaction.guildId;
   if (!guildId || !manager.isActive(guildId)) {
     await interaction.reply({ content: "no active recording in this server.", ephemeral: true });
     return;
   }
+  const transcribe = interaction.options.getBoolean("transcribe") ?? false;
+  const type = interaction.options.getString("type") ?? "batch";
+
   await interaction.deferReply();
-  const result = await manager.stop(guildId);
+  const result = await manager.stop(guildId, { transcribe, type });
   if (!result) {
     await interaction.editReply("no active recording in this server.");
     return;
   }
-  await interaction.editReply(
-    `Recorded ${result.speakerCount} speakers, ${formatDuration(result.totalDurationSec)}. See admin panel for download.`,
-  );
+
+  let msg = `Recorded ${result.speakerCount} speakers, ${formatDuration(result.totalDurationSec)}. See admin panel for download.`;
+  if (transcribe) {
+    if (cfg.transcribeHook) {
+      const note = type === "incremental" ? " (incremental coming soon — running batch)" : "";
+      msg += `\n📝 Transcribing${note}… the transcript will appear in the session folder in a few minutes.`;
+    } else {
+      msg += `\n⚠️ Transcription was requested but isn't configured on this bot.`;
+    }
+  }
+  await interaction.editReply(msg);
 }
 
 /** Auto-stop path (hard cap): stop then post a notice in the originating channel. */

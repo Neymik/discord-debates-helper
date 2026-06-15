@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { statSync } from "node:fs";
+import { spawn as nodeSpawn } from "node:child_process";
 import path from "node:path";
 import { joinVoiceChannel, EndBehaviorType, type VoiceConnection } from "@discordjs/voice";
 import type { VoiceBasedChannel, TextBasedChannel } from "discord.js";
@@ -46,12 +47,26 @@ const BACKOFF = { baseMs: 1000, capMs: 60_000, totalBudgetMs: 3_600_000 };
 /** The file-registration payload, sourced from ApiClient so the two never drift. */
 type RegisterFileInput = Parameters<ApiClient["registerFile"]>[1];
 
+/** Post-stop transcription request, set from the `/record stop` flags. */
+export interface TranscribeOpts {
+  transcribe: boolean;
+  type: string; // "batch" (implemented) | "incremental" (reserved)
+}
+
+/** Minimal spawn shape so tests can inject a fake instead of launching a process. */
+export type SpawnFn = (
+  command: string,
+  args: string[],
+  options: { detached: boolean; stdio: "ignore" },
+) => { unref(): void };
+
 export class RecordingManager {
   private readonly active = new Map<string, ActiveRecording>();
 
   constructor(
     private readonly api: ApiClient,
     private readonly cfg: BotConfig,
+    private readonly spawnFn: SpawnFn = (c, a, o) => nodeSpawn(c, a, o),
   ) {}
 
   isActive(guildId: string): boolean {
@@ -167,7 +182,10 @@ export class RecordingManager {
    * left the session stuck at status='recording'). Returns speaker count + total
    * duration for the reply (files are on disk; persistence is resilient/async).
    */
-  async stop(guildId: string): Promise<{ speakerCount: number; totalDurationSec: number } | null> {
+  async stop(
+    guildId: string,
+    opts?: TranscribeOpts,
+  ): Promise<{ speakerCount: number; totalDurationSec: number } | null> {
     const rec = this.active.get(guildId);
     if (!rec) return null;
     this.active.delete(guildId); // release the in-memory per-guild lock up front
@@ -229,18 +247,49 @@ export class RecordingManager {
     }
 
     // Persist out-of-band so the long backoff never blocks the reply or the guild.
-    void this.persist(rec.sessionId, files).catch((err) =>
+    void this.persist(rec.sessionId, files, rec.fileDir, opts).catch((err) =>
       console.error(`[discord-bot] persist failed for session ${rec.sessionId}:`, err),
     );
 
     return { speakerCount: files.length, totalDurationSec };
   }
 
-  /** Registers each file then completes the session, each with backoff (spec §5). */
-  private async persist(sessionId: string, files: RegisterFileInput[]): Promise<void> {
+  /**
+   * Registers each file then completes the session, each with backoff (spec §5).
+   * Only after completeSession succeeds — which is when the API writes
+   * `_metadata.json` (recordings.ts) that the transcriber reads — do we kick off
+   * transcription, if `/record stop transcribe:true` was used.
+   */
+  private async persist(
+    sessionId: string,
+    files: RegisterFileInput[],
+    fileDir: string,
+    opts?: TranscribeOpts,
+  ): Promise<void> {
     for (const f of files) {
       await retryWithBackoff(() => this.api.registerFile(sessionId, f), BACKOFF);
     }
     await retryWithBackoff(() => this.api.completeSession(sessionId), BACKOFF);
+    if (opts?.transcribe) this.fireTranscription(fileDir, opts.type);
+  }
+
+  /**
+   * Launches the configured transcription hook detached (fire-and-forget) so a
+   * multi-minute transcription never blocks the guild or the interaction. The hook
+   * receives `<session-dir-name> <type>`. No-op (with a warning) when unset.
+   */
+  private fireTranscription(fileDir: string, type: string): void {
+    const hook = this.cfg.transcribeHook;
+    if (!hook) {
+      console.warn("[discord-bot] transcribe requested but TRANSCRIBE_HOOK is not set; skipping");
+      return;
+    }
+    const dirName = path.basename(fileDir);
+    try {
+      this.spawnFn(hook, [dirName, type], { detached: true, stdio: "ignore" }).unref();
+      console.log(`[discord-bot] transcription launched for ${dirName} (type=${type}) via ${hook}`);
+    } catch (err) {
+      console.error("[discord-bot] failed to launch transcription hook:", err);
+    }
   }
 }

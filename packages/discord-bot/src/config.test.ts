@@ -46,4 +46,10 @@ describe("buildBotConfig", () => {
     expect(buildBotConfig({ ...base, ANNOUNCE_ENABLED: "true" }).announceEnabled).toBe(true);
     expect(buildBotConfig({ ...base, ANNOUNCE_ENABLED: "false" }).announceEnabled).toBe(false);
   });
+
+  it("reads the optional transcribe hook (undefined when unset or empty)", () => {
+    expect(buildBotConfig(base).transcribeHook).toBeUndefined();
+    expect(buildBotConfig({ ...base, TRANSCRIBE_HOOK: "" }).transcribeHook).toBeUndefined();
+    expect(buildBotConfig({ ...base, TRANSCRIBE_HOOK: "/x/hook.sh" }).transcribeHook).toBe("/x/hook.sh");
+  });
 });

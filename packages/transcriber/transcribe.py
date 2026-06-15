@@ -16,6 +16,8 @@ import os
 import sys
 import json
 import datetime
+import subprocess
+import tempfile
 from pathlib import Path
 
 from faster_whisper import WhisperModel
@@ -48,6 +50,75 @@ def fmt_ts(ms):
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
+def whisper_segments(model, audio_path, beam_size=BEAM_SIZE):
+    """Transcribe a file → list of {start, end, text} (talk-time seconds), non-empty."""
+    segs, _info = model.transcribe(
+        str(audio_path), language=LANGUAGE, vad_filter=True, beam_size=beam_size
+    )
+    out = []
+    for ws in segs:
+        text = ws.text.strip()
+        if text:
+            out.append({"start": ws.start, "end": ws.end, "text": text})
+    return out
+
+
+def recover_wav(src_path):
+    """Re-decode an audio file past corrupt packets into a temp 16 kHz mono WAV.
+
+    A handful of bad Opus packets make faster-whisper bail on the first one and
+    return nothing, silently dropping the whole speaker. ffmpeg's discardcorrupt
+    skips the bad packets and decodes the rest. Returns the temp WAV path, or None
+    if ffmpeg is missing or produced nothing usable. Caller must delete the path.
+    """
+    fd, tmp = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
+             "-i", str(src_path), "-ar", "16000", "-ac", "1", "-y", tmp],
+            check=False,
+        )
+        if os.path.getsize(tmp) > 1024:  # bigger than an empty WAV header → real audio
+            return tmp
+    except FileNotFoundError:
+        print("[transcriber] ffmpeg not found — cannot recover corrupt file", file=sys.stderr)
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    return None
+
+
+def _atomic_write(path, text):
+    """Write via a temp file + rename so a crash mid-write never leaves a partial
+    (and the previous checkpoint survives intact)."""
+    tmp = str(path) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
+def write_outputs(session_dir, meta, merged, per_speaker, started):
+    """(Re)write _transcript.json/.txt from the accumulated segments. Called after
+    every file as a checkpoint, so a later crash (e.g. an OOM on the last file)
+    still leaves a complete transcript of everything done so far."""
+    ordered = sorted(merged, key=lambda e: e["wall_ms"])
+    finished = datetime.datetime.now(datetime.timezone.utc)
+    out = {
+        "session_id": meta.get("session_id"),
+        "language": LANGUAGE,
+        "model": MODEL,
+        "generated_at": finished.isoformat().replace("+00:00", "Z"),
+        "elapsed_sec": round((finished - started).total_seconds(), 1),
+        "segments": ordered,
+        "per_speaker": per_speaker,
+    }
+    _atomic_write(session_dir / "_transcript.json", json.dumps(out, ensure_ascii=False, indent=2))
+    lines = [f"[{fmt_ts(e['wall_ms'])}] {e['speaker']}: {e['text']}" for e in ordered]
+    _atomic_write(session_dir / "_transcript.txt", "\n".join(lines) + "\n")
+    return out
+
+
 def main():
     if len(sys.argv) < 2:
         print("usage: transcribe.py <session-dir | session-dir-name>", file=sys.stderr)
@@ -77,23 +148,35 @@ def main():
         segs = sorted(f.get("segments", []), key=lambda s: s["audio_offset_ms"])
         speaker = f.get("display_name") or f.get("discord_username") or f.get("discord_user_id")
         print(f"[transcriber] transcribing {f['file']} ({speaker}) ...", flush=True)
-        whisper_segments, info = model.transcribe(
-            str(audio_path), language=LANGUAGE, vad_filter=True, beam_size=BEAM_SIZE
-        )
+        ws_segments = whisper_segments(model, audio_path)
+
+        # Self-heal: 0 segments usually means a few corrupt Opus packets made
+        # faster-whisper bail on the first bad packet. Re-decode past the corruption
+        # with ffmpeg's discardcorrupt and retry before giving up on the speaker.
+        if not ws_segments:
+            print("[transcriber]   0 segments — attempting corrupt-packet recovery", flush=True)
+            tmp = recover_wav(audio_path)
+            if tmp:
+                # Recovery is a salvage pass over a whole re-decoded file; run it at
+                # beam 1 to keep peak memory down (large-v3 + a second full pass can
+                # OOM a small Docker VM) and speed it up. Minor accuracy cost on audio
+                # that would otherwise be lost entirely.
+                ws_segments = whisper_segments(model, tmp, beam_size=1)
+                os.remove(tmp)
+                if ws_segments:
+                    print(f"[transcriber]   recovered {len(ws_segments)} segments via discardcorrupt", flush=True)
+
         chunks = []
-        for ws in whisper_segments:
-            text = ws.text.strip()
-            if not text:
-                continue
+        for ws in ws_segments:
             entry = {
                 "speaker": speaker,
                 "discord_username": f.get("discord_username"),
                 "discord_user_id": f.get("discord_user_id"),
-                "wall_ms": wall_for(segs, ws.start * 1000),
-                "wall_end_ms": wall_for(segs, ws.end * 1000),
-                "audio_start_s": round(ws.start, 2),
-                "audio_end_s": round(ws.end, 2),
-                "text": text,
+                "wall_ms": wall_for(segs, ws["start"] * 1000),
+                "wall_end_ms": wall_for(segs, ws["end"] * 1000),
+                "audio_start_s": round(ws["start"], 2),
+                "audio_end_s": round(ws["end"], 2),
+                "text": ws["text"],
             }
             merged.append(entry)
             chunks.append(entry)
@@ -103,25 +186,11 @@ def main():
             "segment_count": len(chunks),
         }
         print(f"[transcriber]   {len(chunks)} segments", flush=True)
+        # Checkpoint after every file: if a later file crashes the process (e.g. an
+        # OOM during a heavy recovery pass), the work done so far is already saved.
+        write_outputs(session_dir, meta, merged, per_speaker, started)
 
-    merged.sort(key=lambda e: e["wall_ms"])
-    finished = datetime.datetime.now(datetime.timezone.utc)
-
-    out = {
-        "session_id": meta.get("session_id"),
-        "language": LANGUAGE,
-        "model": MODEL,
-        "generated_at": finished.isoformat().replace("+00:00", "Z"),
-        "elapsed_sec": round((finished - started).total_seconds(), 1),
-        "segments": merged,
-        "per_speaker": per_speaker,
-    }
-    (session_dir / "_transcript.json").write_text(
-        json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-    lines = [f"[{fmt_ts(e['wall_ms'])}] {e['speaker']}: {e['text']}" for e in merged]
-    (session_dir / "_transcript.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    out = write_outputs(session_dir, meta, merged, per_speaker, started)
 
     print(
         f"[transcriber] done: {len(files)} files, {len(merged)} segments, "

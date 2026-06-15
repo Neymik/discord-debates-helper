@@ -12,6 +12,7 @@ export interface BotConfig {
   redisUrl: string;
   maxSessionHours: number;
   announceEnabled: boolean;
+  transcribeHook: string | undefined;
 }
 
 /**
@@ -35,5 +36,10 @@ export function buildBotConfig(source: Record<string, string | undefined> = proc
     // The pre-debate "starts in 30 min" announcer. On by default; set
     // ANNOUNCE_ENABLED=false to silence it (bot-local, not in the shared schema).
     announceEnabled: source.ANNOUNCE_ENABLED !== "false",
+    // Optional executable invoked after a session completes when `/record stop
+    // transcribe:true` is used: `<hook> <session-dir-name> <type>`. Unset (the
+    // default) makes transcription a no-op — safe for prod/containers without it.
+    transcribeHook:
+      source.TRANSCRIBE_HOOK && source.TRANSCRIBE_HOOK.length > 0 ? source.TRANSCRIBE_HOOK : undefined,
   };
 }
