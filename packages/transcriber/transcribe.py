@@ -98,16 +98,19 @@ def _atomic_write(path, text):
     os.replace(tmp, path)
 
 
-def write_outputs(session_dir, meta, merged, per_speaker, started):
+def write_outputs(session_dir, meta, merged, per_speaker, started, complete=False):
     """(Re)write _transcript.json/.txt from the accumulated segments. Called after
-    every file as a checkpoint, so a later crash (e.g. an OOM on the last file)
-    still leaves a complete transcript of everything done so far."""
+    every file as a checkpoint (complete=False), so a crash (e.g. an OOM on the last
+    file) still leaves a transcript of everything done so far, and once more at the
+    end (complete=True). The `complete` flag lets the worker tell a finished
+    transcript from a mid-run checkpoint and retry the latter."""
     ordered = sorted(merged, key=lambda e: e["wall_ms"])
     finished = datetime.datetime.now(datetime.timezone.utc)
     out = {
         "session_id": meta.get("session_id"),
         "language": LANGUAGE,
         "model": MODEL,
+        "complete": complete,
         "generated_at": finished.isoformat().replace("+00:00", "Z"),
         "elapsed_sec": round((finished - started).total_seconds(), 1),
         "segments": ordered,
@@ -190,7 +193,7 @@ def main():
         # OOM during a heavy recovery pass), the work done so far is already saved.
         write_outputs(session_dir, meta, merged, per_speaker, started)
 
-    out = write_outputs(session_dir, meta, merged, per_speaker, started)
+    out = write_outputs(session_dir, meta, merged, per_speaker, started, complete=True)
 
     print(
         f"[transcriber] done: {len(files)} files, {len(merged)} segments, "

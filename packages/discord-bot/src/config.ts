@@ -13,6 +13,8 @@ export interface BotConfig {
   maxSessionHours: number;
   announceEnabled: boolean;
   transcribeHook: string | undefined;
+  recoverOnBoot: boolean;
+  recoverTranscribe: boolean;
 }
 
 /**
@@ -41,5 +43,10 @@ export function buildBotConfig(source: Record<string, string | undefined> = proc
     // default) makes transcription a no-op — safe for prod/containers without it.
     transcribeHook:
       source.TRANSCRIBE_HOOK && source.TRANSCRIBE_HOOK.length > 0 ? source.TRANSCRIBE_HOOK : undefined,
+    // On boot, finalize recordings orphaned by a crash (reconstruct from the on-disk
+    // sidecars → registerFile + completeSession). On by default; RECOVER_ON_BOOT=false to skip.
+    recoverOnBoot: source.RECOVER_ON_BOOT !== "false",
+    // Whether recovered sessions are auto-queued for transcription (marker drop).
+    recoverTranscribe: source.RECOVER_TRANSCRIBE !== "false",
   };
 }

@@ -7,6 +7,12 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes: [pgdata:/var/lib/postgresql/data]
     ports: ["127.0.0.1:5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
     restart: unless-stopped
 
   redis:
@@ -14,41 +20,87 @@ services:
     command: redis-server --appendonly yes
     volumes: [redisdata:/data]
     ports: ["127.0.0.1:6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
   api:
     build:
       context: .
       dockerfile: packages/api/Dockerfile
-    depends_on: [postgres, redis]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379
       RECORDINGS_DIR: /var/lib/debates/recordings
     env_file: .env
     volumes:
-      - recordings:/var/lib/debates/recordings
+      # Bind to a fixed repo-relative dir so recordings live on disk (not an opaque
+      # named volume). Override RECORDINGS_PATH in .env (absolute path recommended).
+      - ${RECORDINGS_PATH:-./records}:/var/lib/debates/recordings
     ports: ["127.0.0.1:3000:3000"]
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s # generous cover for `prisma migrate deploy` on first cold boot
     restart: unless-stopped
 
   discord-bot:
     build:
       context: .
       dockerfile: packages/discord-bot/Dockerfile
-    depends_on: [api, redis]
+    depends_on:
+      api: { condition: service_healthy }
+      redis: { condition: service_healthy }
     environment:
       REDIS_URL: redis://redis:6379
       API_BASE_URL: http://api:3000
       RECORDINGS_DIR: /var/lib/debates/recordings
     env_file: .env
     volumes:
-      - recordings:/var/lib/debates/recordings        # same volume as api (spec §9)
+      - ${RECORDINGS_PATH:-./records}:/var/lib/debates/recordings # same host dir as api
+    # Give graceful shutdown (SIGTERM handler → finalize in-flight recordings) room
+    # to register/complete before SIGKILL on `docker stop`/redeploy.
+    stop_grace_period: 30s
     restart: unless-stopped
 
-  # Run-once tool (profile `tools`, not started by `up`). Transcribes a session:
+  # Always-on transcription worker. Polls the recordings dir and transcribes any
+  # session the bot opted in via `/record stop transcribe:true` (a `_transcribe.request`
+  # marker), one at a time. Reuses the transcriber image with a different entrypoint.
+  transcriber-worker:
+    build:
+      context: packages/transcriber
+      dockerfile: Dockerfile
+    entrypoint: ["python", "worker.py"]
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-large-v3}
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-ru}
+      RECORDINGS_DIR: /recordings
+      WHISPER_DOWNLOAD_ROOT: /models
+      HF_HOME: /models
+      POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC:-30}
+    volumes:
+      - ${RECORDINGS_PATH:-./records}:/recordings # same host dir as api/bot
+      - whisper-models:/models # ~3GB large-v3 cache (named volume, not in the repo)
+    mem_limit: 4g # bound large-v3 so an OOM kills only the worker, not the stack
+    restart: unless-stopped
+
+  # Run-once manual tool (profile `tools`, not started by `up`). Re-transcribe a
+  # specific session (e.g. an old one with no marker):
   #   docker compose run --rm transcriber <session-dir-name>
-  # Local dev (api/bot native, files in host /tmp/debates-recordings):
-  #   RECORDINGS_SOURCE=/tmp/debates-recordings docker compose run --rm transcriber <dir>
   transcriber:
     build:
       context: packages/transcriber
@@ -63,11 +115,10 @@ services:
       WHISPER_DOWNLOAD_ROOT: /models
       HF_HOME: /models
     volumes:
-      - ${RECORDINGS_SOURCE:-recordings}:/recordings   # named volume (prod) or host bind (dev)
-      - whisper-models:/models                         # ~3GB large-v3, downloaded once
+      - ${RECORDINGS_PATH:-./records}:/recordings
+      - whisper-models:/models
 
 volumes:
   pgdata:
   redisdata:
-  recordings:
   whisper-models:

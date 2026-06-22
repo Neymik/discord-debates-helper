@@ -1,7 +1,14 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterAll } from "vitest";
+import { mkdtempSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { RecordingManager, type SpawnFn } from "./session.js";
+import { TRANSCRIBE_MARKER } from "./sidecar.js";
 import type { ApiClient } from "../apiClient.js";
 import type { BotConfig } from "../config.js";
+
+const tmpRoot = mkdtempSync(path.join(tmpdir(), "session-"));
+afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
 
 /**
  * `start()` needs a live Discord voice connection, so we exercise the
@@ -54,10 +61,20 @@ describe("RecordingManager transcription hook", () => {
     expect(spawnFn).not.toHaveBeenCalled();
   });
 
-  it("does NOT launch the hook when transcribe requested but no hook is configured", async () => {
+  it("drops a _transcribe.request marker (not a spawn) when no hook is configured (in-container path)", async () => {
     const { spawnFn, persist } = makeManager({ hook: undefined });
-    await persist("s1", [{ a: 1 }], FILE_DIR, { transcribe: true, type: "batch" });
+    const dir = mkdtempSync(path.join(tmpRoot, "marker-"));
+    await persist("s1", [{ a: 1 }], dir, { transcribe: true, type: "batch" });
     expect(spawnFn).not.toHaveBeenCalled();
+    expect(existsSync(path.join(dir, TRANSCRIBE_MARKER))).toBe(true); // worker will pick it up
+  });
+
+  it("does NOT drop a marker when transcribe is false and no hook", async () => {
+    const { spawnFn, persist } = makeManager({ hook: undefined });
+    const dir = mkdtempSync(path.join(tmpRoot, "nomarker-"));
+    await persist("s1", [{ a: 1 }], dir, { transcribe: false, type: "batch" });
+    expect(spawnFn).not.toHaveBeenCalled();
+    expect(existsSync(path.join(dir, TRANSCRIBE_MARKER))).toBe(false);
   });
 
   it("passes the chosen type through to the hook (incremental)", async () => {

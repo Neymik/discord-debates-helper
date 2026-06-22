@@ -15,7 +15,7 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY transcribe.py transcribe_one.py ./
+COPY transcribe.py transcribe_one.py worker.py ./
 
 ENV RECORDINGS_DIR=/recordings \
     WHISPER_MODEL=large-v3 \

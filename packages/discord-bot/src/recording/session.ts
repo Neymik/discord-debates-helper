@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { statSync } from "node:fs";
 import { spawn as nodeSpawn } from "node:child_process";
 import path from "node:path";
@@ -10,6 +10,16 @@ import { OpusFileWriter } from "./opusFile.js";
 import { recordingFileName } from "./filename.js";
 import { retryWithBackoff } from "../lib/backoff.js";
 import { capTimings } from "./caps.js";
+import {
+  writeSessionJson,
+  appendOpen,
+  appendSeg,
+  touchHeartbeat,
+  TRANSCRIBE_MARKER,
+} from "./sidecar.js";
+
+/** How often the live recording touches its heartbeat so recovery can spot orphans. */
+const HEARTBEAT_INTERVAL_MS = 30_000;
 
 /** One contiguous speaking burst (internal, camelCase; mapped to snake_case at registerFile). */
 interface BurstSegment {
@@ -40,6 +50,7 @@ interface ActiveRecording {
   captures: Map<string, UserCapture>; // keyed by discord user id
   warnTimer: NodeJS.Timeout;
   stopTimer: NodeJS.Timeout;
+  heartbeat: NodeJS.Timeout; // periodic _heartbeat touch so recovery can spot orphans
 }
 
 const BACKOFF = { baseMs: 1000, capMs: 60_000, totalBudgetMs: 3_600_000 };
@@ -62,6 +73,8 @@ export type SpawnFn = (
 
 export class RecordingManager {
   private readonly active = new Map<string, ActiveRecording>();
+  /** In-flight background persist() promises, so shutdown can wait for them. */
+  private readonly persisting = new Set<Promise<void>>();
 
   constructor(
     private readonly api: ApiClient,
@@ -87,6 +100,21 @@ export class RecordingManager {
     const guildId = voiceChannel.guild.id;
     const sessionStartedAtMs = Date.now();
     await mkdir(session.fileDir, { recursive: true });
+
+    // Crash-safe: persist the session identity + first heartbeat to disk up front
+    // so a hard kill mid-recording can be reconstructed and finalized on restart.
+    try {
+      writeSessionJson(session.fileDir, {
+        sessionId: session.id,
+        guildId,
+        voiceChannelId: voiceChannel.id,
+        voiceChannelName: voiceChannel.name,
+        startedAtMs: sessionStartedAtMs,
+      });
+      touchHeartbeat(session.fileDir);
+    } catch (err) {
+      console.error("[discord-bot] failed to write session sidecar:", err);
+    }
 
     const connection = joinVoiceChannel({
       channelId: voiceChannel.id,
@@ -127,6 +155,12 @@ export class RecordingManager {
           openSegment: null,
         };
         captures.set(userId, cap);
+        // Persist this speaker's identity (file→user map) for crash recovery.
+        try {
+          appendOpen(session.fileDir, fileName, { discordUserId: userId, discordUsername: username });
+        } catch (err) {
+          console.error("[discord-bot] failed to write open sidecar:", err);
+        }
       }
       // Open a burst anchored to the current talk-time offset in this user's file.
       if (!cap.openSegment) {
@@ -138,17 +172,32 @@ export class RecordingManager {
       const cap = captures.get(userId);
       if (!cap?.openSegment) return;
       const endMs = Date.now() - sessionStartedAtMs;
-      cap.segments.push({
+      const seg = {
         wallMs: cap.openSegment.wallMs,
         audioOffsetMs: cap.openSegment.audioOffsetMs,
         durationMs: Math.max(0, endMs - cap.openSegment.wallMs),
-      });
+      };
+      cap.segments.push(seg);
       cap.openSegment = null;
+      // Append the closed burst to disk so the timeline survives a crash.
+      try {
+        appendSeg(session.fileDir, cap.fileName, seg);
+      } catch (err) {
+        console.error("[discord-bot] failed to append seg sidecar:", err);
+      }
     });
 
     const { warnAfterMs, stopAfterMs } = capTimings(this.cfg.maxSessionHours);
     const warnTimer = setTimeout(onWarn, warnAfterMs);
     const stopTimer = setTimeout(onAutoStop, stopAfterMs);
+    const heartbeat = setInterval(() => {
+      try {
+        touchHeartbeat(session.fileDir);
+      } catch {
+        /* best-effort liveness signal */
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+    heartbeat.unref?.(); // don't keep the event loop alive for the heartbeat alone
 
     this.active.set(guildId, {
       sessionId: session.id,
@@ -160,6 +209,7 @@ export class RecordingManager {
       captures,
       warnTimer,
       stopTimer,
+      heartbeat,
     });
   }
 
@@ -169,8 +219,32 @@ export class RecordingManager {
     if (!rec) return;
     clearTimeout(rec.warnTimer);
     clearTimeout(rec.stopTimer);
+    clearInterval(rec.heartbeat);
     if (rec.connection.state.status !== "destroyed") rec.connection.destroy();
     this.active.delete(guildId);
+  }
+
+  /**
+   * Finalize every active recording — used by the process shutdown handlers
+   * (SIGTERM/SIGINT/uncaught). Each stop() ends the streams (flushing the final
+   * Ogg page) and schedules a background persist; we then await those persists so
+   * the register/complete HTTP calls land before exit. The ENTIRE operation is
+   * bounded by a single `graceMs` deadline (default 20s, comfortably under the
+   * compose `stop_grace_period: 30s`) so a slow flush can't starve the persist
+   * wait and a hung backend can't block exit past Docker's SIGKILL. Anything that
+   * doesn't finish in time is picked up by boot recovery on the next start.
+   */
+  async stopAll(graceMs = 20_000): Promise<void> {
+    const guildIds = [...this.active.keys()];
+    if (guildIds.length === 0) return;
+    console.warn(`[discord-bot] shutdown: finalizing ${guildIds.length} active recording(s)`);
+    const finalizeAll = (async () => {
+      // stop() ends streams (flushes the final Ogg page) + schedules background persist.
+      await Promise.allSettled(guildIds.map((g) => this.stop(g, { transcribe: false, type: "batch" })));
+      // Then wait for those background persists (registerFile + completeSession) to land.
+      await Promise.allSettled([...this.persisting]);
+    })();
+    await Promise.race([finalizeAll, new Promise<void>((resolve) => setTimeout(resolve, graceMs))]);
   }
 
   /**
@@ -191,6 +265,7 @@ export class RecordingManager {
     this.active.delete(guildId); // release the in-memory per-guild lock up front
     clearTimeout(rec.warnTimer);
     clearTimeout(rec.stopTimer);
+    clearInterval(rec.heartbeat);
     rec.connection.receiver.speaking.removeAllListeners(); // no new captures or burst events
 
     // Close any burst still open at stop time (the speaker was talking when /record
@@ -247,9 +322,12 @@ export class RecordingManager {
     }
 
     // Persist out-of-band so the long backoff never blocks the reply or the guild.
-    void this.persist(rec.sessionId, files, rec.fileDir, opts).catch((err) =>
+    // Track the promise so shutdown (stopAll) can wait for it to settle.
+    const p = this.persist(rec.sessionId, files, rec.fileDir, opts).catch((err) =>
       console.error(`[discord-bot] persist failed for session ${rec.sessionId}:`, err),
     );
+    this.persisting.add(p);
+    void p.finally(() => this.persisting.delete(p));
 
     return { speakerCount: files.length, totalDurationSec };
   }
@@ -274,22 +352,36 @@ export class RecordingManager {
   }
 
   /**
-   * Launches the configured transcription hook detached (fire-and-forget) so a
-   * multi-minute transcription never blocks the guild or the interaction. The hook
-   * receives `<session-dir-name> <type>`. No-op (with a warning) when unset.
+   * Requests transcription of a finished session. Two delivery paths:
+   *  - Host dev (TRANSCRIBE_HOOK set): spawn the hook detached with
+   *    `<session-dir-name> <type>` — runs `docker compose run transcriber` on the host.
+   *  - In-container (no hook): drop a `_transcribe.request` marker into the session
+   *    dir; the long-running transcriber-worker container picks it up. This is how
+   *    `/record stop transcribe:true` reaches the worker without a host docker CLI.
    */
   private fireTranscription(fileDir: string, type: string): void {
     const hook = this.cfg.transcribeHook;
-    if (!hook) {
-      console.warn("[discord-bot] transcribe requested but TRANSCRIBE_HOOK is not set; skipping");
+    const dirName = path.basename(fileDir);
+    if (hook) {
+      try {
+        this.spawnFn(hook, [dirName, type], { detached: true, stdio: "ignore" }).unref();
+        console.log(`[discord-bot] transcription launched for ${dirName} (type=${type}) via ${hook}`);
+      } catch (err) {
+        console.error("[discord-bot] failed to launch transcription hook:", err);
+      }
       return;
     }
-    const dirName = path.basename(fileDir);
+    // No hook → marker for the worker. Fire-and-forget (the worker polls).
+    void this.dropTranscribeMarker(fileDir);
+  }
+
+  /** Drop the `_transcribe.request` marker the transcriber-worker watches for. */
+  async dropTranscribeMarker(fileDir: string): Promise<void> {
     try {
-      this.spawnFn(hook, [dirName, type], { detached: true, stdio: "ignore" }).unref();
-      console.log(`[discord-bot] transcription launched for ${dirName} (type=${type}) via ${hook}`);
+      await writeFile(path.join(fileDir, TRANSCRIBE_MARKER), String(Date.now()));
+      console.log(`[discord-bot] transcribe marker dropped for ${path.basename(fileDir)}`);
     } catch (err) {
-      console.error("[discord-bot] failed to launch transcription hook:", err);
+      console.error("[discord-bot] failed to drop transcribe marker:", err);
     }
   }
 }

@@ -99,12 +99,10 @@ async function handleStop(
 
   let msg = `Recorded ${result.speakerCount} speakers, ${formatDuration(result.totalDurationSec)}. See admin panel for download.`;
   if (transcribe) {
-    if (cfg.transcribeHook) {
-      const note = type === "incremental" ? " (incremental coming soon — running batch)" : "";
-      msg += `\n📝 Transcribing${note}… the transcript will appear in the session folder in a few minutes.`;
-    } else {
-      msg += `\n⚠️ Transcription was requested but isn't configured on this bot.`;
-    }
+    // Delivered either by the host hook (dev) or the transcriber-worker (Docker);
+    // both land the transcript in the session folder.
+    const note = type === "incremental" ? " (incremental coming soon — running batch)" : "";
+    msg += `\n📝 Transcribing${note}… the transcript will appear in the session folder in a few minutes.`;
   }
   await interaction.editReply(msg);
 }

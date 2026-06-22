@@ -19,6 +19,34 @@ Parliamentary Debate is a competitive debating game where participants take role
 | **Telegram Bot** | Registration, notifications, personal AI feedback |
 | **Web Admin** | Game scheduling, topic management, monitoring |
 
+## Running it (Docker, one-click)
+
+The whole stack — Postgres, Redis, API, Discord bot, and the transcription worker — runs from Docker Compose.
+
+```bash
+cp .env.example .env     # fill in DISCORD_BOT_TOKEN, DISCORD_GUILD_ID, POSTGRES_PASSWORD, the *_API_TOKEN secrets
+make up                  # == docker compose up -d --build
+```
+
+After the first `make up`, the project appears in **Docker Desktop → Compose**; the **▶ Start** button there is the one-click start thereafter. Boot order is enforced by healthchecks: `postgres → redis → api` (runs `prisma migrate deploy`) `→ discord-bot` + `transcriber-worker`.
+
+**Recordings on disk.** All services bind-mount one host directory, `RECORDINGS_PATH` (default `./records`). Set it to an **absolute path** in `.env` so it always resolves to the same folder regardless of where you launch Compose:
+
+```
+RECORDINGS_PATH=/Users/you/Documents/discord-debates-helper/records
+```
+
+Per-speaker `.ogg`, `_metadata.json`, and `_transcript.*` for every session land there.
+
+**Transcription.** Stop a recording with `/record stop transcribe:true` and the bot drops a marker the always-on `transcriber-worker` picks up — the transcript appears in the session folder a few minutes later (large-v3, Russian, sequential, memory-capped). Re-transcribe any session manually with `make transcribe SESSION=<dir-name>`.
+
+**Crash resilience.** The bot writes crash-safe sidecars as it records and finalizes any session orphaned by a crash on its next start (Compose's `restart: unless-stopped` makes this automatic); `docker stop` triggers a graceful finalize within a 30s grace period.
+
+**Notes.**
+- Don't also run the host `.claude/launch-bot.cjs` while the `discord-bot` container is up — two gateway connections on one token cause duplicate command handling.
+- On a ~5.8 GB Docker VM, large-v3 can OOM; raise **Docker Desktop → Resources → Memory to ~8 GB** for reliable transcription. The worker is capped at 4 GB and checkpoints partial transcripts, so an OOM only costs a retry.
+- `make down` stops everything (volumes, including Postgres data and the model cache, are kept).
+
 ## Game Flow
 
 ### Stage 1: Setup
